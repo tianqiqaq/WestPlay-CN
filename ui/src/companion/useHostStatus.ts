@@ -50,6 +50,23 @@ export interface HostStatus {
   /** Every profile's map (mirrors `westplay_host::maps::ProfileMap`): WestPlay makes one for each, one by
    * one, the profile played first. */
   profileMaps: ProfileMap[]
+  /** The screen also served in a browser, as the host has it now (mirrors `westplay_host::Status`'s `mirror`);
+   * `null`: it's off, or the host hasn't said yet. */
+  mirror: MirrorStatus | null
+  error: string | null
+}
+
+/** The screen mirrored to a browser by the host (mirrors the `mirror` of `westplay_host::Status`). */
+export interface MirrorStatus {
+  /** The port it's served on. */
+  port: number
+  /** Where a browser on this PC opens it (`null`: not listening). */
+  localUrl: string | null
+  /** Where a device on the same network opens it (`null`: only this PC, or not listening). */
+  lanUrl: string | null
+  /** How many browser pages are showing it now. */
+  clients: number
+  /** Why it couldn't start (a port another app has, say); `null`: fine. */
   error: string | null
 }
 

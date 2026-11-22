@@ -1,6 +1,6 @@
 import { useEffect, useMemo } from 'react'
 import { create } from 'zustand'
-import { CABIN_FILES, type Customizations, fileUrl, type IconStyle, NO_CUSTOMIZATIONS } from '../../shared/customize'
+import { type Customizations, cabinFiles, fileUrl, type IconStyle, NO_CUSTOMIZATIONS } from '../../shared/customize'
 import { type AppIconRole, appIcon } from '../../shared/icons'
 import { BUILT_IN_WALLPAPERS, customWallpaper, type Wallpaper } from '../wallpapers'
 import { animateAppearance } from './launch'
@@ -22,7 +22,7 @@ export const useLooks = create<Looks>()(() => ({
   custom: NO_CUSTOMIZATIONS,
   iconSet: null,
   iconStyle: 'auto',
-  base: CABIN_FILES,
+  base: cabinFiles(),
 }))
 
 export function isIconStyle(style: unknown): style is IconStyle {

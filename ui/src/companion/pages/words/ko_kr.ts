@@ -2,6 +2,7 @@ import type { CompanionWords } from '.'
 
 export const words: CompanionWords = {
   sections: {
+    mirror: 'Browser',
     screen: '트럭 화면',
     controls: '조작',
     customize: '사용자화',
@@ -197,6 +198,7 @@ export const words: CompanionWords = {
     holdAgain: { title: '{key} 누르고 있기', text: '화면을 쓰려면' },
     next: '다음',
     tour: {
+      mirror: 'Watch the truck’s screen in a browser, and choose whether other devices on your network can too.',
       screen: 'WestPlay를 켜거나 끄고, 게임과 트럭 화면이 연결됐는지 확인해요.',
       controls: '누르고 있을 키와 포인터 속도를 바꿔요.',
       customize: '나만의 배경화면과 앱 아이콘을 추가하고, 화면에 보일 것을 골라요.',
@@ -316,5 +318,36 @@ export const words: CompanionWords = {
     sub: 'WestPlay는 무료예요. 운전이 더 즐거워졌다면 Kreosus에서 개발을 후원할 수 있어요. 한 번만 해도, 매달 해도 돼요.',
     button: 'Kreosus에서 후원하기',
     note: '브라우저에서 Kreosus가 열려요.',
+  },
+  mirror: {
+    title: 'Browser Access',
+    sub: 'Watch and use the truck’s screen in a browser, on this PC or another device on your network.',
+    status: {
+      running: 'Running',
+      off: 'Not running. Turn it on below, and the screen opens in a browser.',
+      failed: 'Couldn’t start',
+      clients: '{n} pages connected',
+    },
+    local: 'On this PC',
+    lan: 'On your network',
+    copy: 'Copy',
+    copied: 'Copied',
+    open: 'Open',
+    settings: 'Mirror',
+    enable: 'Mirror the screen',
+    enableDetail: 'Serve the same screen in a browser, on the port below.',
+    port: 'Port',
+    portDetail: 'A port from {min} to {max}, not used by another app.',
+    portInvalid: 'Use a port from {min} to {max}.',
+    lanOn: 'Allow other devices',
+    lanDetail: 'On, any device on the same network can open and use the screen. Only on networks you trust.',
+    save: 'Save',
+    saved: 'Applied',
+    saveFailed: 'Couldn’t save. {error}',
+    notes: {
+      sameScreen: 'The browser shows a live mirror of the same screen: what you click there reaches the cab.',
+      sound: 'Sound stays in the game and the truck. The browser is silent.',
+      video: 'YouTube’s video is black in the browser: the host composes that picture for the truck.',
+    },
   },
 }

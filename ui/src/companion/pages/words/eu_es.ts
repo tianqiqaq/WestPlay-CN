@@ -2,6 +2,7 @@ import type { CompanionWords } from '.'
 
 export const words: CompanionWords = {
   sections: {
+    mirror: 'Browser',
     screen: 'Kamioiaren pantaila',
     controls: 'Kontrolak',
     customize: 'Pertsonalizatu',
@@ -198,6 +199,7 @@ export const words: CompanionWords = {
     holdAgain: { title: 'Eutsi {key}', text: 'Pantaila erabiltzeko' },
     next: 'Hurrengoa',
     tour: {
+      mirror: 'Watch the truck’s screen in a browser, and choose whether other devices on your network can too.',
       screen: 'Aktibatu edo desaktibatu WestPlay, eta ikusi jokoa eta kamioiaren pantaila konektatuta dauden.',
       controls: 'Aldatu eusten diozun tekla eta erakuslearen abiadura.',
       customize: 'Gehitu horma-paperak eta aplikazio-ikonoak, eta aukeratu zein ikusiko diren pantailan.',
@@ -318,5 +320,36 @@ export const words: CompanionWords = {
     sub: 'WestPlay doakoa da. Zure bidaiak hobetzen baditu, Kreosus-en lagun diezaiokezu haren garapenari, behin edo hilero.',
     button: 'Lagundu Kreosus-en',
     note: 'Kreosus arakatzailean irekitzen du.',
+  },
+  mirror: {
+    title: 'Browser Access',
+    sub: 'Watch and use the truck’s screen in a browser, on this PC or another device on your network.',
+    status: {
+      running: 'Running',
+      off: 'Not running. Turn it on below, and the screen opens in a browser.',
+      failed: 'Couldn’t start',
+      clients: '{n} pages connected',
+    },
+    local: 'On this PC',
+    lan: 'On your network',
+    copy: 'Copy',
+    copied: 'Copied',
+    open: 'Open',
+    settings: 'Mirror',
+    enable: 'Mirror the screen',
+    enableDetail: 'Serve the same screen in a browser, on the port below.',
+    port: 'Port',
+    portDetail: 'A port from {min} to {max}, not used by another app.',
+    portInvalid: 'Use a port from {min} to {max}.',
+    lanOn: 'Allow other devices',
+    lanDetail: 'On, any device on the same network can open and use the screen. Only on networks you trust.',
+    save: 'Save',
+    saved: 'Applied',
+    saveFailed: 'Couldn’t save. {error}',
+    notes: {
+      sameScreen: 'The browser shows a live mirror of the same screen: what you click there reaches the cab.',
+      sound: 'Sound stays in the game and the truck. The browser is silent.',
+      video: 'YouTube’s video is black in the browser: the host composes that picture for the truck.',
+    },
   },
 }

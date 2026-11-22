@@ -2,6 +2,7 @@ import type { CompanionWords } from '.'
 
 export const words: CompanionWords = {
   sections: {
+    mirror: 'Browser',
     screen: 'Lastbilsskärm',
     controls: 'Styrning',
     customize: 'Anpassa',
@@ -198,6 +199,7 @@ export const words: CompanionWords = {
     holdAgain: { title: 'Håll in {key}', text: 'För att använda skärmen' },
     next: 'Nästa',
     tour: {
+      mirror: 'Watch the truck’s screen in a browser, and choose whether other devices on your network can too.',
       screen: 'Slå på eller av WestPlay, och se om spelet och lastbilens skärm är anslutna.',
       controls: 'Byt tangenten du håller in, och hur snabbt pekaren rör sig.',
       customize: 'Lägg till egna bakgrundsbilder och appsymboler och välj vilka skärmen visar.',
@@ -318,5 +320,36 @@ export const words: CompanionWords = {
     sub: 'WestPlay är gratis. Gör det dina körningar roligare kan du stödja utvecklingen på Kreosus – en gång eller varje månad.',
     button: 'Stöd på Kreosus',
     note: 'Öppnar Kreosus i webbläsaren.',
+  },
+  mirror: {
+    title: 'Browser Access',
+    sub: 'Watch and use the truck’s screen in a browser, on this PC or another device on your network.',
+    status: {
+      running: 'Running',
+      off: 'Not running. Turn it on below, and the screen opens in a browser.',
+      failed: 'Couldn’t start',
+      clients: '{n} pages connected',
+    },
+    local: 'On this PC',
+    lan: 'On your network',
+    copy: 'Copy',
+    copied: 'Copied',
+    open: 'Open',
+    settings: 'Mirror',
+    enable: 'Mirror the screen',
+    enableDetail: 'Serve the same screen in a browser, on the port below.',
+    port: 'Port',
+    portDetail: 'A port from {min} to {max}, not used by another app.',
+    portInvalid: 'Use a port from {min} to {max}.',
+    lanOn: 'Allow other devices',
+    lanDetail: 'On, any device on the same network can open and use the screen. Only on networks you trust.',
+    save: 'Save',
+    saved: 'Applied',
+    saveFailed: 'Couldn’t save. {error}',
+    notes: {
+      sameScreen: 'The browser shows a live mirror of the same screen: what you click there reaches the cab.',
+      sound: 'Sound stays in the game and the truck. The browser is silent.',
+      video: 'YouTube’s video is black in the browser: the host composes that picture for the truck.',
+    },
   },
 }

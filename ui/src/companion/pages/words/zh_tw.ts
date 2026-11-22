@@ -2,6 +2,7 @@ import type { CompanionWords } from '.'
 
 export const words: CompanionWords = {
   sections: {
+    mirror: 'Browser',
     screen: '卡車螢幕',
     controls: '控制',
     customize: '自訂',
@@ -195,6 +196,7 @@ export const words: CompanionWords = {
     holdAgain: { title: '按住 {key}', text: '以使用螢幕' },
     next: '下一步',
     tour: {
+      mirror: 'Watch the truck’s screen in a browser, and choose whether other devices on your network can too.',
       screen: '開啟或關閉 WestPlay，並查看遊戲和卡車螢幕是否已連線。',
       controls: '變更要按住的鍵，以及指標移動的速度。',
       customize: '加入你自己的桌布和 App 圖像，並選擇螢幕上顯示哪些。',
@@ -312,5 +314,36 @@ export const words: CompanionWords = {
     sub: 'WestPlay 是免費的。如果它讓你開車更愉快，可以在 Kreosus 上支持它的開發，單次或每月皆可。',
     button: '在 Kreosus 上支持',
     note: '將在瀏覽器中開啟 Kreosus。',
+  },
+  mirror: {
+    title: 'Browser Access',
+    sub: 'Watch and use the truck’s screen in a browser, on this PC or another device on your network.',
+    status: {
+      running: 'Running',
+      off: 'Not running. Turn it on below, and the screen opens in a browser.',
+      failed: 'Couldn’t start',
+      clients: '{n} pages connected',
+    },
+    local: 'On this PC',
+    lan: 'On your network',
+    copy: 'Copy',
+    copied: 'Copied',
+    open: 'Open',
+    settings: 'Mirror',
+    enable: 'Mirror the screen',
+    enableDetail: 'Serve the same screen in a browser, on the port below.',
+    port: 'Port',
+    portDetail: 'A port from {min} to {max}, not used by another app.',
+    portInvalid: 'Use a port from {min} to {max}.',
+    lanOn: 'Allow other devices',
+    lanDetail: 'On, any device on the same network can open and use the screen. Only on networks you trust.',
+    save: 'Save',
+    saved: 'Applied',
+    saveFailed: 'Couldn’t save. {error}',
+    notes: {
+      sameScreen: 'The browser shows a live mirror of the same screen: what you click there reaches the cab.',
+      sound: 'Sound stays in the game and the truck. The browser is silent.',
+      video: 'YouTube’s video is black in the browser: the host composes that picture for the truck.',
+    },
   },
 }

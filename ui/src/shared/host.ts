@@ -128,7 +128,8 @@ export type HostMessage =
       /** The language chosen in the companion (a game code, `de_de`); `null`: the game's. */
       language?: string | null
     }
-  /** The player's own wallpapers and icon sets (shared/customize.ts), their files at `CABIN_FILES`. */
+  /** The player's own wallpapers and icon sets (shared/customize.ts), their files where `cabinFiles()` says (the
+   * host's virtual host, or the mirror server's path in a page it mirrors). */
   | { type: 'customize'; wallpapers: CustomWallpaper[]; iconSets: IconSet[] }
   /** The music's spectrum as it plays, while the page asks for it (`spectrum`): bars from the lows to the
    * highs, spaced by octaves, each 0 (silent) to 255; all 0 when it stops. */
@@ -222,8 +223,8 @@ export type HostMessage =
   | { type: 'youtubeAccount'; signedIn: boolean; avatar: string | null }
   /** Whether Google's sign-in window is open on the PC's desktop. */
   | { type: 'youtubeSignIn'; open: boolean }
-  /** The map the cab shows: its folder in WestPlay's maps (served at `https://westplay.maps/`), and when it
-   * was built; `null` for none (none built yet). */
+  /** The map the cab shows: its folder in WestPlay's maps (served at `https://westplay.maps/`; a page the host
+   * mirrors to a browser: the mirror server's `/maps`), and when it was built; `null` for none (none built yet). */
   | { type: 'map'; folder: string | null; built: number | null }
   /** Spotify's web player: whether it's signed in and playing (`null`: not running), and whether its sign-in
    * window is open on the PC's desktop. Nothing else of the account. */
@@ -291,8 +292,8 @@ export type HostMessage =
   | { type: 'playerPlayback'; playback: PlayerPlayback | null }
 
 /** A song of the game's music folder (`westplay_host::music_folder::Song`): its file's name, and what its tags
- * say (none on a file without them): title, artist, length (seconds; 0: not known), cover (a file at
- * `https://westplay.music-covers/`). */
+ * say (none on a file without them): title, artist, length (seconds; 0: not known), cover (a file at the covers'
+ * host: `https://westplay.music-covers/`, or the mirror server's `/music-covers/` in a page the host mirrors). */
 export interface PlayerSong {
   file: string
   title?: string
@@ -1224,6 +1225,9 @@ interface WebViewBridge {
 declare global {
   interface Window {
     chrome?: { webview?: WebViewBridge }
+    /** Set by the host in the cabin page it mirrors to a plain browser (crates/host mirror.rs): the port its
+     * mirror server listens on. The page then talks to it over that server's `/api`, not over WebView2. */
+    __WESTPLAY_MIRROR__?: { port: number }
   }
 }
 
@@ -1231,18 +1235,46 @@ declare global {
  * even inside a WebView2 (the companion's own). See cabin/demo.ts. */
 export const IS_DEMO = typeof location !== 'undefined' && new URLSearchParams(location.search).has('demo')
 
-/** Whether the page runs inside the WestPlay host (and not in a plain browser preview, nor as the demo). */
-export function isInHost(): boolean {
-  return !IS_DEMO && window.chrome?.webview !== undefined
+/** Whether the page is the copy of the cabin page the host mirrors to a plain browser (crates/host mirror.rs):
+ * the host writes `window.__WESTPLAY_MIRROR__` into the page it serves there. Never the demo. */
+export function isMirrored(): boolean {
+  return !IS_DEMO && typeof window !== 'undefined' && window.__WESTPLAY_MIRROR__ !== undefined
 }
+
+/** Whether the page runs inside the WestPlay host: in its WebView2, or as the page it mirrors to a browser (and
+ * not in a plain browser preview, nor as the demo). */
+export function isInHost(): boolean {
+  if (IS_DEMO || typeof window === 'undefined') return false
+  return window.chrome?.webview !== undefined || isMirrored()
+}
+
+/** The mirror server's routes (crates/host mirror.rs), on the page's own origin. */
+const MIRROR_EVENTS = '/api/events'
+const MIRROR_PAGE = '/api/page'
 
 /**
  * Calls `listener` for every host message. Returns the unsubscribe function.
+ *
+ * In the host's WebView2 the messages are web messages; in the page it mirrors to a plain browser they arrive as
+ * Server-Sent Events (`GET /api/events`, each event's data one `HostMessage` as JSON).
  *
  * Subscribing also tells the host the page is ready, so it sends the current state again: anything it
  * sent before this page (re)loaded was lost, and some state (like the truck) is only sent on change.
  */
 export function subscribeHostMessages(listener: (message: HostMessage) => void): () => void {
+  if (typeof window === 'undefined') return () => {}
+  if (isMirrored()) {
+    const source = new EventSource(MIRROR_EVENTS)
+    source.onmessage = (event) => {
+      try {
+        listener(JSON.parse(event.data) as HostMessage)
+      } catch {
+        // A message it can't read (a newer host's, or one cut short): ignored, the stream goes on.
+      }
+    }
+    postToHost({ type: 'ready' })
+    return () => source.close()
+  }
   const webview = window.chrome?.webview
   if (!webview) return () => {}
   const onMessage = (event: { data: HostMessage }) => listener(event.data)
@@ -1251,8 +1283,20 @@ export function subscribeHostMessages(listener: (message: HostMessage) => void):
   return () => webview.removeEventListener('message', onMessage)
 }
 
-/** Sends a message to the host (nothing happens in a plain browser preview). */
+/** Sends a message to the host: a web message in its WebView2, or `POST /api/page` from the page it mirrors to a
+ * plain browser (nothing happens in a plain browser preview). */
 export function postToHost(message: PageMessage): void {
+  if (typeof window === 'undefined') return
+  if (isMirrored()) {
+    // Not awaited: the page goes on either way (a send that fails changes nothing it can see).
+    fetch(MIRROR_PAGE, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(message),
+      keepalive: true,
+    }).catch(() => {})
+    return
+  }
   window.chrome?.webview?.postMessage(message)
 }
 

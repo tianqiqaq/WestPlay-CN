@@ -7,6 +7,11 @@
  * onboarding's words.
  *
  * The translations other than English and Turkish were written without a native speaker's review yet.
+ *
+ * Browser Access (`mirror`) is newer: only English (`en_us`) and Simplified Chinese (`zh_cn`) have real words
+ * for it. Every other language carries the English words there, waiting to be translated; its own language's
+ * words are already in place around it. Serbian Latin, Spanish (Latin America), French (Canada), Silesian and
+ * British English are made from their base language, so they take the same English mirror words.
  */
 export interface CompanionWords {
   sections: Record<SectionId, string>
@@ -135,6 +140,8 @@ export interface CompanionWords {
      * `{free}`: gigabytes). */
     memory: { title: string; banner: { title: string; text: string }; note: { title: string; text: string } }
   }
+  /** Browser Access: the screen also served in a browser. */
+  mirror: MirrorWords
   setup: {
     title: string
     sub: string
@@ -233,6 +240,42 @@ export interface CompanionWords {
   }
 }
 
+/**
+ * Browser Access (the screen served in a browser): its state, the addresses, and the mirror's settings.
+ * `{n}`: how many pages are connected; `{min}`, `{max}`: the port range; `{error}`: why saving failed.
+ */
+export interface MirrorWords {
+  title: string
+  sub: string
+  status: {
+    running: string
+    off: string
+    failed: string
+    clients: string
+  }
+  local: string
+  lan: string
+  copy: string
+  copied: string
+  open: string
+  settings: string
+  enable: string
+  enableDetail: string
+  port: string
+  portDetail: string
+  portInvalid: string
+  lanOn: string
+  lanDetail: string
+  save: string
+  saved: string
+  saveFailed: string
+  notes: {
+    sameScreen: string
+    sound: string
+    video: string
+  }
+}
+
 export interface UninstallWords {
   row: string
   title: string
@@ -274,7 +317,16 @@ export interface TutorialWords {
   finish: string
 }
 
-export type SectionId = 'screen' | 'controls' | 'customize' | 'accounts' | 'map' | 'setup' | 'about' | 'support'
+export type SectionId =
+  | 'screen'
+  | 'mirror'
+  | 'controls'
+  | 'customize'
+  | 'accounts'
+  | 'map'
+  | 'setup'
+  | 'about'
+  | 'support'
 
 const WORDS: Record<string, CompanionWords> = Object.fromEntries(
   Object.entries(import.meta.glob<CompanionWords>('./[a-z][a-z]_[a-z][a-z].ts', { eager: true, import: 'words' })).map(

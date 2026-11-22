@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { create } from 'zustand'
+import { mapsBase } from '../../shared/bases'
 import { isInHost } from '../../shared/host'
 
 /**
@@ -7,12 +8,12 @@ import { isInHost } from '../../shared/host'
  * profile they play: crates/host maps.rs): vector tiles, and a small manifest with their zooms and bounds,
  * where the map starts, and the place names.
  *
- * In WestPlay the host names the map's folder (`map` messages), served at `https://westplay.maps/`; it names
- * another when the player plays another profile (another map, other map mods), and none until a map is built.
- * A plain browser (development) has the map exported into public/dev-map/ (git-ignored, never shipped).
+ * In WestPlay the host names the map's folder (`map` messages), served at `https://westplay.maps/` (or, in a page
+ * the host mirrors to a plain browser, at the mirror server's `/maps`: shared/bases.ts); it names another when the
+ * player plays another profile (another map, other map mods), and none until a map is built. A plain browser
+ * (development) has the map exported into public/dev-map/ (git-ignored, never shipped).
  */
 const DEV_MAP = '/dev-map'
-const MAPS = 'https://westplay.maps'
 
 export interface MapLabel {
   /** The place's own name, in its own language and script. */
@@ -101,7 +102,7 @@ function firstBase(): string | null | undefined {
 
 /** The host names the map's folder in its maps, and when it was built (`null`: none). */
 export function receiveMapFolder(folder: string | null, built: number | null): void {
-  useMapFolder.setState({ base: folder ? `${MAPS}/${encodeURIComponent(folder)}` : null, built })
+  useMapFolder.setState({ base: folder ? `${mapsBase()}/${encodeURIComponent(folder)}` : null, built })
 }
 
 /** The onboarding's demo names the map's address itself (served by the companion, not the host). */

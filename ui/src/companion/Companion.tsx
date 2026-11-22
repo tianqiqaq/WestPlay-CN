@@ -12,6 +12,7 @@ import { Controls } from './pages/Controls'
 import { Customize } from './pages/Customize'
 import { type MapProgress, useMapProgress } from './mapProgress'
 import { MapPage } from './pages/MapPage'
+import { MirrorPage } from './pages/MirrorPage'
 import { screenState } from './pages/page'
 import { ScreenPage } from './pages/ScreenPage'
 import { Setup } from './pages/Setup'
@@ -80,7 +81,7 @@ export function Companion() {
 }
 
 const SECTIONS: SectionId[][] = [
-  ['screen', 'controls', 'customize'],
+  ['screen', 'mirror', 'controls', 'customize'],
   ['accounts', 'map'],
   ['setup', 'about'],
   ['support'],
@@ -98,6 +99,7 @@ const POSE: Record<Phase, Pose> = { lesson: 'full', tour: 'aside', launch: 'fina
 /** The light the screen casts while each section is up. */
 const SECTION_GLOW: Record<SectionId, string> = {
   screen: GLOW.home,
+  mirror: GLOW.home,
   controls: GLOW.home,
   customize: GLOW.home,
   accounts: GLOW.youtube,
@@ -338,6 +340,7 @@ function Room({
               />
             )}
             {roomShown && section === 'screen' && <ScreenPage {...page} />}
+            {roomShown && section === 'mirror' && <MirrorPage {...page} />}
             {roomShown && section === 'controls' && <Controls {...page} />}
             {roomShown && section === 'customize' && <Customize {...page} />}
             {roomShown && section === 'accounts' && <Accounts {...page} />}
@@ -420,6 +423,14 @@ function SectionList({
             : state === 'unsupported'
               ? cw.screen.screenUnsupported
               : '',
+    // The port it's served on, while it is; off or failed otherwise.
+    mirror: !status
+      ? ''
+      : status.mirror
+        ? status.mirror.error
+          ? cw.values.failed
+          : `:${status.mirror.port}`
+        : cw.values.off,
     controls: keyName,
     customize: '',
     accounts:

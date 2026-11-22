@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
 import { create } from 'zustand'
+import { coversBase } from '../../../shared/bases'
 import {
   isInHost,
   type PlayerCommand,
@@ -41,12 +42,9 @@ export const usePlayer = create<PlayerState>(() => ({
   volume: 1,
 }))
 
-/** Where the songs' covers are served (the host's `music_folder::COVERS_HOST`). */
-const COVERS = 'https://westplay.music-covers/'
-
 /** A song's cover, or `null` without one. */
 export function coverOf(song: PlayerSong | null | undefined): string | null {
-  return song?.cover ? COVERS + encodeURIComponent(song.cover) : null
+  return song?.cover ? coversBase() + encodeURIComponent(song.cover) : null
 }
 
 /** A song's name: its title, else its file's name without its extension. */

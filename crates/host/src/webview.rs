@@ -209,6 +209,8 @@ pub struct OffscreenWebView {
     frame_ready: Rc<Cell<bool>>,
     /// The worst process failure since last taken (`take_failure`).
     failure: Rc<Cell<Option<Failure>>>,
+    /// Whether what this page is sent is mirrored on the local port too (mirror.rs): only the cabin page's.
+    mirrors: Cell<bool>,
     pub version: String,
 }
 
@@ -347,6 +349,7 @@ impl OffscreenWebView {
             frame: Rc::default(),
             frame_ready: Rc::default(),
             failure,
+            mirrors: Cell::new(false),
             version,
         })
     }
@@ -797,14 +800,30 @@ impl OffscreenWebView {
         unsafe { self.webview.NavigateToString(&HSTRING::from(html)) }
     }
 
-    /// Messages the page posted since the last call, oldest first.
+    /// Messages the page posted since the last call, oldest first: this page's, and (mirror.rs) the mirrored
+    /// page's.
     pub fn take_page_messages(&self) -> Vec<String> {
-        std::mem::take(&mut self.page_messages.borrow_mut())
+        // Stated, so `take`'s `T` is the `Vec` the `RefCell` holds (and not the `RefMut` itself).
+        let mut messages: Vec<String> = std::mem::take(&mut self.page_messages.borrow_mut());
+        messages.extend(crate::mirror::take_page_messages());
+        messages
     }
 
+    /// Mirrors what this page is sent on the local port too (mirror.rs): set for the cabin page alone, never for
+    /// another view of the screen.
+    pub fn set_mirrors(&self, on: bool) {
+        self.mirrors.set(on);
+    }
+
+    /// Sends a message to the page, and to the mirrored page too when this view is the cabin's: whether this
+    /// WebView took it or not.
     pub fn post_json(&self, json: &str) -> windows::core::Result<()> {
         // SAFETY: the WebView is alive as long as `self`; the message lives through the call.
-        unsafe { self.webview.PostWebMessageAsJson(&HSTRING::from(json)) }
+        let posted = unsafe { self.webview.PostWebMessageAsJson(&HSTRING::from(json)) };
+        if self.mirrors.get() {
+            crate::mirror::broadcast(json);
+        }
+        posted
     }
 
     /// Mouse input for the page, at `point` in page pixels (`data`: wheel delta, or which X button).

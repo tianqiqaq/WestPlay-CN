@@ -35,9 +35,25 @@ export interface Settings {
     buildings: boolean
     roads: boolean
   }
+  /** The screen also served in a browser (the companion's Browser Access page). */
+  mirror: MirrorSettings
   /** The language WestPlay speaks in the cab and here: one of the game's (`de_de`), or `null`: the game's. */
   language: string | null
 }
+
+/** Mirrors `westplay_host::settings::Mirror`: the screen also served in a browser, on `port`. */
+export interface MirrorSettings {
+  enabled: boolean
+  port: number
+  /** Any device on the same network, or this PC only. */
+  lan: boolean
+}
+
+/** What the mirror is when the app has never saved it (mirrors the host's own defaults). */
+export const MIRROR_DEFAULT: MirrorSettings = { enabled: true, port: 35421, lan: true }
+
+/** The ports the mirror's page takes: above the well-known ones, up to the top. */
+export const MIRROR_PORT = { min: 1024, max: 65535 }
 
 /** Mirrors `westplay_host::settings::TruckStrip`: the truck's own strip beside WestPlay, kept or not. */
 export type TruckStrip = 'auto' | 'off'

@@ -21,11 +21,14 @@ import type { Settings } from './useSettings'
  * - `?elevated`: the game run as administrator (WestPlay can't read its route, guidance or weather).
  * - `?updated` (or `?updated=admin`): WestPlay updated since it was set up: the new plugin goes into the game
  *   once it's closed (with `admin`, Windows' permission is asked for first).
+ * - `?mirror=off|error`: the screen not served in a browser, or failing to start (a port another app has).
  *
  * Nothing here is ever in the app.
  */
 const query = new URLSearchParams(location.search)
 const gameState = query.get('game') ?? 'live'
+/** `off`: the mirror's settings say so; `error`: it's on but a browser would fail to open it. */
+const mirrorState = query.get('mirror') ?? 'on'
 
 const GAME: GameInfo = {
   kind: 'ets2',
@@ -81,6 +84,7 @@ let settings: Settings = {
   look: { wallpaper: null, iconSet: null, iconStyle: 'auto' },
   graphics: { gpu: null },
   map: { buildings: true, roads: true },
+  mirror: { enabled: mirrorState !== 'off', port: 35421, lan: true },
   language: null,
 }
 
@@ -134,6 +138,18 @@ const ADAPTERS = [
 
 function status(): HostStatus {
   const live = gameState === 'live'
+  // What the mirror would say: on as its settings say, and the port they name (a failing one included, through
+  // `?mirror=error`).
+  const mirrorPort = settings.mirror.port
+  const mirror = settings.mirror.enabled
+    ? {
+        port: mirrorPort,
+        localUrl: `http://127.0.0.1:${mirrorPort}/cabin.html`,
+        lanUrl: settings.mirror.lan ? `http://192.168.1.23:${mirrorPort}/cabin.html` : null,
+        clients: mirrorState === 'error' ? 0 : 2,
+        error: mirrorState === 'error' ? `Port ${mirrorPort} is already in use.` : null,
+      }
+    : null
   return {
     webviewVersion: '141.0.3537.71',
     adapter: gameState === 'off' ? null : ADAPTERS[0].name,
@@ -177,6 +193,7 @@ function status(): HostStatus {
         status: map.state === 'ready' ? { state: 'building', done: 0.4, stage: 'drawing' } : { state: 'queued' },
       },
     ],
+    mirror,
     error: null,
   }
 }
@@ -332,6 +349,8 @@ export function answer(command: string, args?: Record<string, unknown>): Promise
     case 'update_settings':
       settings = args?.settings as Settings
       emit('settings-changed', settings)
+      // The mirror restarts on what was saved: its new addresses at once, as the app's status would say.
+      emit('host-status', status())
       return later(settings, 60)
     case 'set_westplay_open':
       westplayOpen = Boolean(args?.open)

@@ -30,3 +30,5 @@ dist/
 # AGENT
 AGENT.md
 CLAUDE.md
+# Local release override (createUpdaterArtifacts off, for builds without the signing key)
+/app/tauri.bundle.tmp.json

@@ -18,6 +18,11 @@ use westplay_shared::{KEYBIND_COUNT, Keybind, keybind_value};
 /// or shape changes (adding a setting needs neither: it takes its default).
 pub const SETTINGS_VERSION: u32 = 2;
 
+/// The port the cabin page is mirrored on (mirror.rs), for the player's phone or tablet beside the truck's
+/// screen: one no other program is likely to take, and one Windows lets a plain program listen on (below 1024
+/// it needs administrator rights).
+pub const DEFAULT_MIRROR_PORT: u16 = 35421;
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -35,6 +40,9 @@ pub struct Settings {
     pub sound: SoundSettings,
     #[serde(deserialize_with = "lenient")]
     pub map: MapSettings,
+    /// The cabin page mirrored on a local port (the player's phone or tablet on the same network), if at all.
+    #[serde(deserialize_with = "lenient")]
+    pub mirror: MirrorSettings,
     /// The language WestPlay speaks, in the cab and the companion (the companion's Setup page): one of the
     /// game's, by its code (`tr_tr`), or `None`: the game's own (owner 2026-11-03).
     #[serde(deserialize_with = "lenient")]
@@ -77,6 +85,38 @@ pub struct MapSettings {
 impl Default for MapSettings {
     fn default() -> Self {
         Self { buildings: true, roads: true }
+    }
+}
+
+/// The cabin page mirrored on a local port (mirror.rs): the same page again, for the player's phone or tablet
+/// beside the truck's screen, at [`DEFAULT_MIRROR_PORT`] unless they choose another.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MirrorSettings {
+    /// Whether the page is served at all.
+    pub enabled: bool,
+    /// The port it's served on: [`Self::clamped`] keeps it one Windows lets WestPlay listen on.
+    pub port: u16,
+    /// Whether the port answers the network too, not only this PC.
+    pub lan: bool,
+}
+
+impl Default for MirrorSettings {
+    fn default() -> Self {
+        Self { enabled: true, port: DEFAULT_MIRROR_PORT, lan: true }
+    }
+}
+
+impl MirrorSettings {
+    /// The lowest port it takes: below 1024, Windows needs the program to run as administrator (and a mirror
+    /// that can't listen is worse than one on another port).
+    pub const MIN_PORT: u16 = 1024;
+
+    /// The port corrected to one it can listen on: a stored 0 (a file written by an older version, or a field
+    /// left empty) or one below [`Self::MIN_PORT`] takes [`DEFAULT_MIRROR_PORT`].
+    pub fn clamped(self) -> Self {
+        let port = if self.port >= Self::MIN_PORT { self.port } else { DEFAULT_MIRROR_PORT };
+        Self { port, ..self }
     }
 }
 
@@ -442,11 +482,14 @@ fn migrate(mut file: serde_json::Value, version: u32) -> serde_json::Value {
     file
 }
 
-/// Reads settings from the JSON of a settings file.
+/// Reads settings from the JSON of a settings file. Values that can't be used as stored are corrected here (the
+/// mirror's port: see [`MirrorSettings::clamped`]).
 pub fn parse(json: &str) -> Result<Settings, serde_json::Error> {
     let file: serde_json::Value = serde_json::from_str(json)?;
     let version = file.get("version").and_then(serde_json::Value::as_u64).unwrap_or(0) as u32;
-    serde_json::from_value(migrate(file, version))
+    let mut settings: Settings = serde_json::from_value(migrate(file, version))?;
+    settings.mirror = settings.mirror.clamped();
+    Ok(settings)
 }
 
 pub fn to_json(settings: &Settings) -> String {
@@ -510,7 +553,10 @@ impl SharedSettings {
         self.current.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    pub fn set(&self, settings: Settings) {
+    /// Keeps `settings` for the host, its mirror's port corrected first: the companion (or the cab) may send a
+    /// number Windows won't let it listen on, and the host must see what it can use.
+    pub fn set(&self, mut settings: Settings) {
+        settings.mirror = settings.mirror.clamped();
         *self.current.write().unwrap_or_else(|e| e.into_inner()) = settings;
         self.generation.fetch_add(1, Ordering::AcqRel);
     }
@@ -574,6 +620,7 @@ mod tests {
                 bass: crate::speakers::BassManagement { cutoff: 70 },
             },
             map: MapSettings { buildings: false, roads: false },
+            mirror: MirrorSettings { enabled: false, port: 9700, lan: false },
             language: LanguageCode::new("pt_br"),
         };
         let json = to_json(&settings);
@@ -612,6 +659,28 @@ mod tests {
         assert!(partial.map.buildings && partial.map.roads);
         // And from before the language could be chosen: the game's.
         assert_eq!(partial.language, None);
+        // And from before the page could be mirrored: on, on the default port, on the network.
+        assert_eq!(partial.mirror, MirrorSettings::default());
+    }
+
+    #[test]
+    fn the_mirrors_port_is_one_it_can_listen_on() {
+        let default = MirrorSettings::default();
+        assert_eq!(default.port, DEFAULT_MIRROR_PORT);
+        assert!(default.enabled && default.lan);
+        // Below 1024 needs administrator rights: the default port instead.
+        for bad in ["0", "80", "1023"] {
+            let settings = parse(&format!(r#"{{"mirror": {{"port": {bad}}}}}"#)).unwrap();
+            assert_eq!(settings.mirror.port, DEFAULT_MIRROR_PORT, "{bad}");
+        }
+        // One it can take, as stored.
+        assert_eq!(parse(r#"{"mirror": {"port": 9700}}"#).unwrap().mirror.port, 9700);
+        // Not a port at all: the whole mirror its default, the other settings kept.
+        let settings = parse(r#"{"mirror": {"port": "fast"}, "map": {"roads": false}}"#).unwrap();
+        assert_eq!(settings.mirror, MirrorSettings::default());
+        assert!(!settings.map.roads);
+        // A port chosen below the minimum is corrected, not the whole mirror.
+        assert_eq!(parse(r#"{"mirror": {"port": 1, "enabled": false}}"#).unwrap().mirror.port, DEFAULT_MIRROR_PORT);
     }
 
     #[test]
@@ -713,5 +782,10 @@ mod tests {
         shared.set(changed.clone());
         assert_ne!(shared.generation(), before);
         assert_eq!(shared.get(), changed);
+        // The mirror's port corrected before the host sees it (a settings window may send any number).
+        let mut port = Settings::default();
+        port.mirror.port = 80;
+        shared.set(port);
+        assert_eq!(shared.get().mirror.port, DEFAULT_MIRROR_PORT);
     }
 }

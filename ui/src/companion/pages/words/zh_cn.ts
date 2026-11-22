@@ -2,6 +2,7 @@ import type { CompanionWords } from '.'
 
 export const words: CompanionWords = {
   sections: {
+    mirror: '浏览器',
     screen: '卡车屏幕',
     controls: '控制',
     customize: '自定义',
@@ -195,6 +196,7 @@ export const words: CompanionWords = {
     holdAgain: { title: '按住 {key}', text: '以使用屏幕' },
     next: '下一步',
     tour: {
+      mirror: '在浏览器中查看卡车屏幕，并选择是否允许同一网络中的其他设备访问。',
       screen: '开启或关闭 WestPlay，并查看游戏和卡车屏幕是否已连接。',
       controls: '更改要按住的键，以及指针移动的速度。',
       customize: '添加你自己的壁纸和应用图标，并选择屏幕上显示哪些。',
@@ -312,5 +314,36 @@ export const words: CompanionWords = {
     sub: 'WestPlay 是免费的。如果它让你开车更愉快，可以在 Kreosus 上支持它的开发，单次或每月均可。',
     button: '在 Kreosus 上支持',
     note: '将在浏览器中打开 Kreosus。',
+  },
+  mirror: {
+    title: '浏览器访问',
+    sub: '在这台电脑或其他设备的浏览器里查看并操作卡车屏幕。',
+    status: {
+      running: '运行中',
+      off: '未运行。在下面开启后，屏幕就会在浏览器中打开。',
+      failed: '无法启动',
+      clients: '{n} 个页面已连接',
+    },
+    local: '本机地址',
+    lan: '局域网地址',
+    copy: '复制',
+    copied: '已复制',
+    open: '打开',
+    settings: '屏幕映射',
+    enable: '映射屏幕',
+    enableDetail: '通过下面的端口把同一块屏幕开放给浏览器。',
+    port: '端口',
+    portDetail: '使用 {min} 到 {max} 之间的端口，且不要被其他程序占用。',
+    portInvalid: '请使用 {min} 到 {max} 之间的端口。',
+    lanOn: '允许局域网设备',
+    lanDetail: '开启后，同一网络中的任何设备都能打开并操作这块屏幕。只在你信任的网络中开启。',
+    save: '保存',
+    saved: '已生效',
+    saveFailed: '保存失败：{error}',
+    notes: {
+      sameScreen: '浏览器里是同一块屏幕的实时镜像，在浏览器里的操作也会作用到车机。',
+      sound: '声音仍在游戏和车机中播放，浏览器不会出声。',
+      video: 'YouTube 的视频画面在浏览器里是黑色的（画面由 host 合成给车机）。',
+    },
   },
 }

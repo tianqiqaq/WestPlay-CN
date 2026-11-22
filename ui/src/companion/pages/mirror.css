@@ -1,0 +1,109 @@
+/* Browser Access: the mirror's addresses, its port, and its notes. Its page is the narrow column between the
+   list and the screen (companion.css `.ob-words[data-place='page']`), so an address wraps instead of pushing
+   its buttons out. */
+
+/* An address: its words and monospaced URL above, Copy (and, outside the app, Open) at the right. */
+.cp-mirror-address {
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+
+.cp-mirror-url {
+  font-family: ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  user-select: text;
+}
+
+.cp-mirror-buttons {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.cp-mirror-buttons button,
+.cp-mirror-buttons a {
+  padding: 5px 11px;
+  border: 0;
+  border-radius: 99px;
+  background: var(--fill-strong);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.2;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 200ms ease;
+}
+
+.cp-mirror-buttons button:hover,
+.cp-mirror-buttons a:hover {
+  background: rgb(255 255 255 / 0.2);
+}
+
+.cp-mirror-buttons button:active,
+.cp-mirror-buttons a:active {
+  background: rgb(255 255 255 / 0.26);
+}
+
+/* The port: iOS's list row, with its field at the right. */
+.cp-mirror-field {
+  flex-shrink: 0;
+  width: 88px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: var(--fill-strong);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  outline: none;
+}
+
+.cp-mirror-field:focus-visible {
+  box-shadow: 0 0 0 2px var(--blue);
+}
+
+.cp-mirror-field[aria-invalid] {
+  box-shadow: 0 0 0 1.5px var(--red);
+}
+
+/* The field's own arrows have no place on a dark list. */
+.cp-mirror-field::-webkit-outer-spin-button,
+.cp-mirror-field::-webkit-inner-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
+.ob-row-text span.cp-mirror-invalid {
+  color: var(--red);
+}
+
+/* What a save says: in effect, in iOS's green, for a moment. */
+.cp-mirror-applied {
+  margin: 0;
+  font-size: 13px;
+  color: var(--green);
+}
+
+/* The page's notes: the same screen, the sound, the video. */
+.cp-mirror-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-faint);
+}
+
+.cp-mirror-notes li::marker {
+  color: var(--text-faint);
+}

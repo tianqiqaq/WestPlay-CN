@@ -19,6 +19,7 @@ mod handover;
 mod lyrics;
 mod music_folder;
 pub mod maps;
+mod mirror;
 mod performance;
 mod planner;
 mod play_log;
@@ -52,10 +53,11 @@ use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, MSG, PM_REMOVE, 
 
 use capture::Capture;
 use gpu::{Gpu, SharedFrame};
+use mirror::{Mirror, Sources};
 use player::{PartSpeakers, Player, PlayerWatch};
 use pointer::Pointer;
 use route::{RouteUpdate, RouteWatch};
-use settings::SharedSettings;
+use settings::{MirrorSettings, SharedSettings};
 use weather::{Sky, Weather, WeatherWatch};
 use webview::{OffscreenWebView, Stage};
 use westplay_mapdata::junctions::Turn;
@@ -131,6 +133,19 @@ pub struct Status {
     pub map_built: Option<u64>,
     /// Every profile's map: ready, being built, to build, failed...
     pub profile_maps: Vec<maps::ProfileMap>,
+    /// The cabin page mirrored on a local port (the player's phone or tablet), as it runs or failed to.
+    pub mirror: Option<MirrorStatus>,
+    pub error: Option<String>,
+}
+
+/// The cabin page's local mirror (mirror.rs): where it serves, how many pages are connected, and why it can't.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MirrorStatus {
+    pub port: u16,
+    pub local_url: Option<String>,
+    pub lan_url: Option<String>,
+    pub clients: usize,
     pub error: Option<String>,
 }
 
@@ -292,6 +307,25 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
     let music_covers = config.data_dir.join("music-covers");
     let _ = std::fs::create_dir_all(&music_covers);
     webview.map_folder_to_any_page(music_folder::COVERS_HOST, &music_covers)?;
+    // The cabin page mirrored on a local port (mirror.rs): the same page, for the player's phone or tablet beside
+    // the truck's screen. Only a page from a folder or a dev server is mirrored; the built-in test page isn't.
+    let mirror_sources = match &config.content {
+        Content::Folder { root, .. } => {
+            Some(Sources { page_root: Some(root.clone()), dev_url: None, data_dir: config.data_dir.clone() })
+        }
+        Content::Url(url) => {
+            Some(Sources { page_root: None, dev_url: Some(url.clone()), data_dir: config.data_dir.clone() })
+        }
+        Content::Html(_) => None,
+    };
+    let mut mirror_settings = config.settings.get().mirror.clamped();
+    let (mut mirror, mut mirror_error) = match &mirror_sources {
+        Some(sources) => {
+            webview.set_mirrors(true);
+            start_mirror(&mirror_settings, sources)
+        }
+        None => (None, None),
+    };
     let music_watch = music_folder::FolderWatch::start(music_covers);
     // The folder and its songs as last listed (sent again when the page reloads).
     let mut music_dir: Option<PathBuf> = None;
@@ -305,6 +339,7 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
         webview_version: webview.version.clone(),
         cab_adapter: cab_gpu.and_then(|luid| graphics::name_of(luid, &adapters)),
         adapters: adapters.clone(),
+        mirror: mirror_status(mirror.as_ref(), &mirror_settings, mirror_sources.as_ref(), mirror_error.as_deref()),
         ..Default::default()
     };
 
@@ -692,6 +727,8 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
                     waited: status.dropped_total,
                 });
                 meter.second(Instant::now(), sample, &webview, &profiles);
+                status.mirror =
+                    mirror_status(mirror.as_ref(), &mirror_settings, mirror_sources.as_ref(), mirror_error.as_deref());
                 (config.on_status)(&status);
                 last_frames = frames;
             }
@@ -728,6 +765,23 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
                 slot.store(value, Ordering::Release);
             }
             let _ = webview.post_json(&settings_message(&config.settings.get()));
+            // The mirror listens as the settings now say: another port, on the network or not, or not at all.
+            let wanted_mirror = config.settings.get().mirror.clamped();
+            if wanted_mirror != mirror_settings {
+                mirror_settings = wanted_mirror;
+                if mirror.take().is_some() {
+                    log!("the cabin page mirror stops: its settings changed");
+                }
+                mirror_error = None;
+                if let Some(sources) = &mirror_sources {
+                    let started = start_mirror(&mirror_settings, sources);
+                    mirror = started.0;
+                    mirror_error = started.1;
+                }
+                status.mirror =
+                    mirror_status(mirror.as_ref(), &mirror_settings, mirror_sources.as_ref(), mirror_error.as_deref());
+                (config.on_status)(&status);
+            }
         }
         let mouse = pointer.update(&bridge.bridge().plugin.pointer, &webview);
         cursor.follow(mouse, Instant::now());
@@ -1993,6 +2047,8 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
     host.screen_enabled.store(0, Ordering::Release);
     host.pid.store(0, Ordering::Release);
     drop(pipeline);
+    // Its listener (and its accept thread) goes with the run.
+    drop(mirror);
     if browser_gone {
         return Err(Box::new(BrowserGone));
     }
@@ -2000,6 +2056,61 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
         return Err(Box::new(graphics::GpuChanged));
     }
     Ok(())
+}
+
+/// Starts the cabin page's mirror as `settings` say (`None`: it's off): the mirror, and why it couldn't start
+/// (`None`: it runs, or it's off).
+fn start_mirror(settings: &MirrorSettings, sources: &Sources) -> (Option<Mirror>, Option<String>) {
+    if !settings.enabled {
+        return (None, None);
+    }
+    match mirror::start(settings, sources) {
+        Ok(mirror) => {
+            match (&mirror.lan_url, mirror.lan) {
+                (Some(lan_url), _) => {
+                    log!("the cabin page mirrors at {} (on the network: {lan_url})", mirror.local_url)
+                }
+                (None, true) => {
+                    log!("the cabin page mirrors at {} (no address on the network was found)", mirror.local_url)
+                }
+                (None, false) => log!("the cabin page mirrors at {}", mirror.local_url),
+            }
+            (Some(mirror), None)
+        }
+        Err(error) => {
+            log!("[mirror] {error}");
+            (None, Some(error))
+        }
+    }
+}
+
+/// The mirror as the status reports it: where it serves and how many pages are on it, or the reason it doesn't
+/// (`None`: it's off, or the page shown isn't one that's mirrored).
+fn mirror_status(
+    mirror: Option<&Mirror>,
+    settings: &MirrorSettings,
+    sources: Option<&Sources>,
+    error: Option<&str>,
+) -> Option<MirrorStatus> {
+    if sources.is_none() || !settings.enabled {
+        return None;
+    }
+    Some(match mirror {
+        Some(mirror) => MirrorStatus {
+            port: mirror.port,
+            local_url: Some(mirror.local_url.clone()),
+            lan_url: mirror.lan_url.clone(),
+            clients: mirror.clients(),
+            error: mirror.error.clone(),
+        },
+        None => MirrorStatus {
+            port: settings.port,
+            local_url: None,
+            lan_url: None,
+            clients: 0,
+            error: error.map(str::to_owned),
+        },
+    })
 }
 
 /// Whether the game's plugin is alive, judged by its heartbeat (its frame count) having moved within

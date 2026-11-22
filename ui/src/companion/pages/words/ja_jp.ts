@@ -2,6 +2,7 @@ import type { CompanionWords } from '.'
 
 export const words: CompanionWords = {
   sections: {
+    mirror: 'Browser',
     screen: 'トラックの画面',
     controls: '操作',
     customize: 'カスタマイズ',
@@ -198,6 +199,7 @@ export const words: CompanionWords = {
     holdAgain: { title: '{key} を押し続ける', text: '画面を操作するには' },
     next: '次へ',
     tour: {
+      mirror: 'Watch the truck’s screen in a browser, and choose whether other devices on your network can too.',
       screen: 'WestPlay のオン・オフを切り替え、ゲームやトラックの画面と接続しているか確認できます。',
       controls: '押し続けるキーと、ポインターの速さを変えられます。',
       customize: '自分の壁紙とアプリアイコンを追加して、画面に表示するものを選べます。',
@@ -321,5 +323,36 @@ export const words: CompanionWords = {
     sub: 'WestPlay は無料です。ドライブが楽しくなったら、Kreosus で開発を応援していただけます（1 回だけでも、毎月でも）。',
     button: 'Kreosus で応援する',
     note: 'ブラウザーで Kreosus が開きます。',
+  },
+  mirror: {
+    title: 'Browser Access',
+    sub: 'Watch and use the truck’s screen in a browser, on this PC or another device on your network.',
+    status: {
+      running: 'Running',
+      off: 'Not running. Turn it on below, and the screen opens in a browser.',
+      failed: 'Couldn’t start',
+      clients: '{n} pages connected',
+    },
+    local: 'On this PC',
+    lan: 'On your network',
+    copy: 'Copy',
+    copied: 'Copied',
+    open: 'Open',
+    settings: 'Mirror',
+    enable: 'Mirror the screen',
+    enableDetail: 'Serve the same screen in a browser, on the port below.',
+    port: 'Port',
+    portDetail: 'A port from {min} to {max}, not used by another app.',
+    portInvalid: 'Use a port from {min} to {max}.',
+    lanOn: 'Allow other devices',
+    lanDetail: 'On, any device on the same network can open and use the screen. Only on networks you trust.',
+    save: 'Save',
+    saved: 'Applied',
+    saveFailed: 'Couldn’t save. {error}',
+    notes: {
+      sameScreen: 'The browser shows a live mirror of the same screen: what you click there reaches the cab.',
+      sound: 'Sound stays in the game and the truck. The browser is silent.',
+      video: 'YouTube’s video is black in the browser: the host composes that picture for the truck.',
+    },
   },
 }
