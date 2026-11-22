@@ -65,7 +65,7 @@ export interface MirrorSettings {
 }
 
 /** What the mirror is when the app has never saved it (mirrors the host's own defaults). */
-export const MIRROR_DEFAULT: MirrorSettings = { enabled: true, port: 35421, lan: true, quality: 85, fps: 30 }
+export const MIRROR_DEFAULT: MirrorSettings = { enabled: true, port: 35421, lan: true, quality: 90, fps: 30 }
 
 /** The ports the mirror's page takes: above the well-known ones, up to the top. */
 export const MIRROR_PORT = { min: 1024, max: 65535 }
@@ -74,7 +74,7 @@ export const MIRROR_PORT = { min: 1024, max: 65535 }
 export const MIRROR_QUALITY = { min: 40, max: 95, step: 5 }
 
 /** How many frames a second the mirror sends (higher is smoother and larger). */
-export const MIRROR_FPS = { min: 5, max: 30, step: 5 }
+export const MIRROR_FPS = { min: 5, max: 60, step: 5 }
 
 /** Mirrors `westplay_host::settings::CoachSpeakers`: a coach plays through its driver's pair, or through every
  * unit over the passengers' seats. */

@@ -328,7 +328,6 @@ fn encode_frames() {
 fn encode_loop() {
     let raw = raw();
     let latest = latest();
-    let mut next = Instant::now();
     let mut rgb = Vec::new();
     loop {
         let frame = {
@@ -340,17 +339,12 @@ fn encode_loop() {
                 slot = raw.wait(slot);
             }
         };
-        // At most the settings' frames a second: while this one waits, a newer replaces it (and is the one encoded).
-        let interval = Duration::from_secs_f32(1.0 / f32::from(FPS.load(Ordering::Relaxed).max(1)));
-        let now = Instant::now();
-        if next > now {
-            thread::sleep(next - now);
-        }
+        // Encoded as soon as a frame is read (the read-back's own cap is the settings' frames a second): no wait
+        // here, so a frame never queues behind the last one's turn.
         let frame = {
             let mut slot = raw.lock();
             slot.take().unwrap_or(frame)
         };
-        next = Instant::now() + interval;
         let quality = QUALITY.load(Ordering::Relaxed).clamp(MirrorSettings::MIN_QUALITY, MirrorSettings::MAX_QUALITY);
         let Some(jpeg) = jpeg(frame.width, frame.height, &frame.bgra, quality, &mut rgb) else { continue };
         {
@@ -413,19 +407,20 @@ const VIEWER: &str = r##"<!doctype html>
 <title>WestPlay</title>
 <style>
 html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;cursor:none}
-img{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;cursor:none;pointer-events:auto;-webkit-user-drag:none}
+canvas{position:fixed;cursor:none;pointer-events:auto;background:#000}
 #hint{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.5em;color:#9aa4ad;font:15px/1.5 system-ui,sans-serif;text-align:center;pointer-events:none}
 #hint[hidden]{display:none}
 </style>
 </head>
 <body>
-<img id="frame" alt="" draggable="false">
+<canvas id="frame"></canvas>
 <div id="hint">Waiting for the truck's screen…<br>正在等待车机画面…</div>
 <script>
 (() => {
   'use strict';
   const W = 1280, H = 720;
-  const img = document.getElementById('frame');
+  const canvas = document.getElementById('frame');
+  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
   const hint = document.getElementById('hint');
   const key = 'westplayMirrorId';
   let id = null;
@@ -440,35 +435,74 @@ img{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;cursor:none
     id = Math.random().toString(36).slice(2) + Date.now().toString(36);
   }
   let seq = 0;
+  let drawn = 0;
+  let inFlight = 0;
+  // How many frames' requests may be out at once: one coming while the last decodes keeps the screen moving.
+  const IN_FLIGHT = 2;
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  async function frames() {
-    for (;;) {
-      let response;
-      try {
-        response = await fetch('/api/frame?after=' + seq + '&id=' + encodeURIComponent(id), { cache: 'no-store' });
-      } catch (e) {
-        await sleep(500);
-        continue;
-      }
-      if (response.status === 204) continue;
+  function layout() {
+    const scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+    const w = Math.max(1, Math.round(W * scale));
+    const h = Math.max(1, Math.round(H * scale));
+    const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    canvas.style.left = Math.round((window.innerWidth - w) / 2) + 'px';
+    canvas.style.top = Math.round((window.innerHeight - h) / 2) + 'px';
+    canvas.width = Math.max(1, Math.round(w * dpr));
+    canvas.height = Math.max(1, Math.round(h * dpr));
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+  }
+  function draw(bitmap) {
+    if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) layout();
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    hint.hidden = true;
+  }
+  async function one() {
+    inFlight++;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      inFlight--;
+    };
+    try {
+      const response = await fetch('/api/frame?after=' + seq + '&id=' + encodeURIComponent(id), { cache: 'no-store' });
       if (!response.ok) {
-        await sleep(500);
-        continue;
+        // 204: nothing new yet; else the server is away for a moment.
+        release();
+        if (response.status !== 204) await sleep(400);
+        return;
       }
-      seq = Number(response.headers.get('X-Seq') || seq + 1);
-      const url = URL.createObjectURL(await response.blob());
-      const old = img.src;
-      img.src = url;
-      if (old.indexOf('blob:') === 0) URL.revokeObjectURL(old);
+      const got = Number(response.headers.get('X-Seq') || seq + 1);
+      const blob = await response.blob();
+      // The next request goes out before this frame decodes: decoding overlaps the wait.
+      release();
+      pump();
+      if (got <= drawn) return;
+      const bitmap = await createImageBitmap(blob);
+      drawn = got;
+      seq = Math.max(seq, got);
+      draw(bitmap);
+      bitmap.close();
+    } catch (e) {
+      release();
+      await sleep(400);
+    } finally {
+      pump();
     }
   }
-  img.addEventListener('load', () => { hint.hidden = true; });
+  function pump() {
+    while (inFlight < IN_FLIGHT) void one();
+  }
+  addEventListener('resize', layout);
   const clamp = (value, size) => Math.min(Math.max(Math.round(value), 0), size - 1);
   function point(event) {
-    const scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+    const box = canvas.getBoundingClientRect();
     return {
-      x: clamp((event.clientX - (window.innerWidth - W * scale) / 2) / scale, W),
-      y: clamp((event.clientY - (window.innerHeight - H * scale) / 2) / scale, H),
+      x: clamp((event.clientX - box.left) / (box.width || 1) * W, W),
+      y: clamp((event.clientY - box.top) / (box.height || 1) * H, H),
     };
   }
   function send(event) {
@@ -480,7 +514,12 @@ img{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;cursor:none
     }).catch(() => {});
   }
   const button = (pressed) => pressed === 0 ? 'left' : pressed === 1 ? 'middle' : 'right';
+  // A moving pointer sends at most this often (the host's pointer takes it at its own rate).
+  let movedAt = 0;
   addEventListener('pointermove', (event) => {
+    const now = performance.now();
+    if (now - movedAt < 8) return;
+    movedAt = now;
     const p = point(event);
     send({ type: 'move', x: p.x, y: p.y });
   }, { passive: true });
@@ -503,7 +542,8 @@ img{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;cursor:none
     send({ type: 'wheel', x: p.x, y: p.y, delta: event.deltaY < 0 ? -120 : 120 });
   }, { passive: false });
   addEventListener('contextmenu', (event) => event.preventDefault());
-  frames();
+  layout();
+  pump();
 })();
 </script>
 </body>
@@ -640,7 +680,8 @@ mod tests {
     fn the_viewer_page_pulls_frames_and_sends_the_mouse() {
         assert!(VIEWER.contains("/api/frame"), "the frames it shows");
         assert!(VIEWER.contains("/api/input"), "the mouse it sends");
-        assert!(VIEWER.contains("object-fit:contain"), "the picture kept whole");
+        assert!(VIEWER.contains("<canvas id=\"frame\">"), "the picture drawn as it comes");
+        assert!(VIEWER.contains("createImageBitmap"), "a frame decoded off the drawing");
         assert!(VIEWER.contains("cursor:none"), "no second cursor over the frame's own");
         assert!(VIEWER.contains("width=device-width"), "a phone's own width");
     }

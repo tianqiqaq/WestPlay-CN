@@ -25,7 +25,7 @@ pub const DEFAULT_MIRROR_PORT: u16 = 35421;
 
 /// The JPEG quality the mirrored frames are encoded at (`MirrorSettings::quality`), the frames being the
 /// screen the game shows, looked at on another screen.
-pub const DEFAULT_MIRROR_QUALITY: u8 = 85;
+pub const DEFAULT_MIRROR_QUALITY: u8 = 90;
 
 /// How many mirrored frames a second are sent (`MirrorSettings::fps`).
 pub const DEFAULT_MIRROR_FPS: u8 = 30;
@@ -137,7 +137,7 @@ impl MirrorSettings {
     pub const MIN_QUALITY: u8 = 40;
     pub const MAX_QUALITY: u8 = 95;
     pub const MIN_FPS: u8 = 5;
-    pub const MAX_FPS: u8 = 30;
+    pub const MAX_FPS: u8 = 60;
 
     /// The settings corrected to what the mirror can use: a stored 0 (a file written by an older version, or a
     /// field left empty) or a port below [`Self::MIN_PORT`] takes [`DEFAULT_MIRROR_PORT`], and the quality and
@@ -743,7 +743,7 @@ mod tests {
             let settings = parse(&format!(r#"{{"mirror": {{"quality": {bad}}}}}"#)).unwrap();
             assert_eq!(settings.mirror.quality, quality, "{bad}");
         }
-        for (bad, fps) in [("0", 5), ("4", 5), ("31", 30), ("255", 30)] {
+        for (bad, fps) in [("0", 5), ("4", 5), ("61", 60), ("255", 60)] {
             let settings = parse(&format!(r#"{{"mirror": {{"fps": {bad}}}}}"#)).unwrap();
             assert_eq!(settings.mirror.fps, fps, "{bad}");
         }
