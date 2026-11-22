@@ -23,6 +23,13 @@ pub const SETTINGS_VERSION: u32 = 2;
 /// it needs administrator rights).
 pub const DEFAULT_MIRROR_PORT: u16 = 35421;
 
+/// The JPEG quality the mirrored frames are encoded at (`MirrorSettings::quality`), the frames being the
+/// screen the game shows, looked at on another screen.
+pub const DEFAULT_MIRROR_QUALITY: u8 = 85;
+
+/// How many mirrored frames a second are sent (`MirrorSettings::fps`).
+pub const DEFAULT_MIRROR_FPS: u8 = 30;
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -93,22 +100,33 @@ impl Default for MapSettings {
     }
 }
 
-/// The cabin page mirrored on a local port (mirror.rs): the same page again, for the player's phone or tablet
-/// beside the truck's screen, at [`DEFAULT_MIRROR_PORT`] unless they choose another.
+/// The cabin page's frames mirrored on a local port (mirror.rs): the same picture the truck's screen shows, for
+/// the player's phone or tablet beside it, at [`DEFAULT_MIRROR_PORT`] unless they choose another.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MirrorSettings {
-    /// Whether the page is served at all.
+    /// Whether the frames are served at all.
     pub enabled: bool,
     /// The port it's served on: [`Self::clamped`] keeps it one Windows lets WestPlay listen on.
     pub port: u16,
     /// Whether the port answers the network too, not only this PC.
     pub lan: bool,
+    /// The JPEG quality the frames are encoded at: [`Self::clamped`] keeps it 40 to 95 (below, the picture
+    /// blurs; above, the frames take longer than they're worth).
+    pub quality: u8,
+    /// The most frames a second that go out: [`Self::clamped`] keeps it 5 to 30.
+    pub fps: u8,
 }
 
 impl Default for MirrorSettings {
     fn default() -> Self {
-        Self { enabled: true, port: DEFAULT_MIRROR_PORT, lan: true }
+        Self {
+            enabled: true,
+            port: DEFAULT_MIRROR_PORT,
+            lan: true,
+            quality: DEFAULT_MIRROR_QUALITY,
+            fps: DEFAULT_MIRROR_FPS,
+        }
     }
 }
 
@@ -116,12 +134,19 @@ impl MirrorSettings {
     /// The lowest port it takes: below 1024, Windows needs the program to run as administrator (and a mirror
     /// that can't listen is worse than one on another port).
     pub const MIN_PORT: u16 = 1024;
+    pub const MIN_QUALITY: u8 = 40;
+    pub const MAX_QUALITY: u8 = 95;
+    pub const MIN_FPS: u8 = 5;
+    pub const MAX_FPS: u8 = 30;
 
-    /// The port corrected to one it can listen on: a stored 0 (a file written by an older version, or a field
-    /// left empty) or one below [`Self::MIN_PORT`] takes [`DEFAULT_MIRROR_PORT`].
+    /// The settings corrected to what the mirror can use: a stored 0 (a file written by an older version, or a
+    /// field left empty) or a port below [`Self::MIN_PORT`] takes [`DEFAULT_MIRROR_PORT`], and the quality and
+    /// the frames' rate are kept between their bounds.
     pub fn clamped(self) -> Self {
         let port = if self.port >= Self::MIN_PORT { self.port } else { DEFAULT_MIRROR_PORT };
-        Self { port, ..self }
+        let quality = self.quality.clamp(Self::MIN_QUALITY, Self::MAX_QUALITY);
+        let fps = self.fps.clamp(Self::MIN_FPS, Self::MAX_FPS);
+        Self { port, quality, fps, ..self }
     }
 }
 
@@ -518,7 +543,7 @@ fn migrate(mut file: serde_json::Value, version: u32) -> serde_json::Value {
 }
 
 /// Reads settings from the JSON of a settings file. Values that can't be used as stored are corrected here (the
-/// mirror's port: see [`MirrorSettings::clamped`]).
+/// mirror's port, its frames' quality and rate: see [`MirrorSettings::clamped`]).
 pub fn parse(json: &str) -> Result<Settings, serde_json::Error> {
     let file: serde_json::Value = serde_json::from_str(json)?;
     let version = file.get("version").and_then(serde_json::Value::as_u64).unwrap_or(0) as u32;
@@ -588,8 +613,9 @@ impl SharedSettings {
         self.current.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// Keeps `settings` for the host, its mirror's port corrected first: the companion (or the cab) may send a
-    /// number Windows won't let it listen on, and the host must see what it can use.
+    /// Keeps `settings` for the host, its mirror's settings corrected first: the companion (or the cab) may send a
+    /// port Windows won't let it listen on, or a quality or rate past what the frames can take, and the host must
+    /// see what it can use.
     pub fn set(&self, mut settings: Settings) {
         settings.mirror = settings.mirror.clamped();
         *self.current.write().unwrap_or_else(|e| e.into_inner()) = settings;
@@ -653,7 +679,7 @@ mod tests {
                 coach: CoachSpeakers::Passengers,
             },
             map: MapSettings { buildings: false, roads: false, fast: true },
-            mirror: MirrorSettings { enabled: false, port: 9700, lan: false },
+            mirror: MirrorSettings { enabled: false, port: 9700, lan: false, quality: 72, fps: 20 },
             language: LanguageCode::new("pt_br"),
         };
         let json = to_json(&settings);
@@ -697,21 +723,32 @@ mod tests {
         assert!(partial.map.buildings && partial.map.roads);
         // And from before the language could be chosen: the game's.
         assert_eq!(partial.language, None);
-        // And from before the page could be mirrored: on, on the default port, on the network.
+        // And from before the page could be mirrored: frames on, on the default port, on the network.
         assert_eq!(partial.mirror, MirrorSettings::default());
     }
 
     #[test]
-    fn the_mirrors_port_is_one_it_can_listen_on() {
+    fn the_mirrors_settings_stay_usable() {
         let default = MirrorSettings::default();
         assert_eq!(default.port, DEFAULT_MIRROR_PORT);
         assert!(default.enabled && default.lan);
+        assert_eq!((default.quality, default.fps), (DEFAULT_MIRROR_QUALITY, DEFAULT_MIRROR_FPS));
         // Below 1024 needs administrator rights: the default port instead.
         for bad in ["0", "80", "1023"] {
             let settings = parse(&format!(r#"{{"mirror": {{"port": {bad}}}}}"#)).unwrap();
             assert_eq!(settings.mirror.port, DEFAULT_MIRROR_PORT, "{bad}");
         }
-        // One it can take, as stored.
+        // The quality and the frames' rate, kept between what the encoder and the network can take.
+        for (bad, quality) in [("0", 40), ("39", 40), ("96", 95), ("255", 95)] {
+            let settings = parse(&format!(r#"{{"mirror": {{"quality": {bad}}}}}"#)).unwrap();
+            assert_eq!(settings.mirror.quality, quality, "{bad}");
+        }
+        for (bad, fps) in [("0", 5), ("4", 5), ("31", 30), ("255", 30)] {
+            let settings = parse(&format!(r#"{{"mirror": {{"fps": {bad}}}}}"#)).unwrap();
+            assert_eq!(settings.mirror.fps, fps, "{bad}");
+        }
+        assert_eq!(parse(r#"{"mirror": {"quality": 72, "fps": 24}}"#).unwrap().mirror.quality, 72);
+        assert_eq!(parse(r#"{"mirror": {"quality": 72, "fps": 24}}"#).unwrap().mirror.fps, 24);
         assert_eq!(parse(r#"{"mirror": {"port": 9700}}"#).unwrap().mirror.port, 9700);
         // Not a port at all: the whole mirror its default, the other settings kept.
         let settings = parse(r#"{"mirror": {"port": "fast"}, "map": {"roads": false}}"#).unwrap();

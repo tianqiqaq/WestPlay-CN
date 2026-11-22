@@ -1,69 +1,58 @@
-//! The cabin page mirrored on a local port: the same page, for the player's phone or tablet beside the truck's
-//! screen.
+//! The cabin page's frames mirrored on a local port: the very picture the truck's screen shows, for the player's
+//! phone or tablet beside it, and their mouse on it taken back into the page.
 //!
-//! The cabin page is drawn offscreen and copied into the game's screen texture: there is no window of it to open
-//! elsewhere. So this serves its files itself (or passes them on from the dev server), sends the same messages the
-//! cabin page gets (`GET /api/events`, `text/event-stream`), and takes what the mirrored page posts back
-//! (`POST /api/page`) as if the cabin page had posted it ([`crate::webview::OffscreenWebView`]).
+//! There is no second page here: the host's WebView is drawn once, and the frames the game takes are copied out of
+//! the shared texture ([`crate::capture`]) as BGRA, encoded to JPEG on a thread of this module, and served to the
+//! viewer page ([`VIEWER`]) a frame at a time (`GET /api/frame`). The mouse the viewer takes on that picture comes
+//! back as `POST /api/input`, and the host sends it into the page at the frame's point
+//! ([`crate::run`]'s `send_mirror_input`), so what's clicked is what's shown.
 //!
 //! It listens on 127.0.0.1, or on every adapter when the player turns the LAN on: then, on the same Wi-Fi, a phone
-//! shows the page too. Only the page's own files are served: a path that tries to leave its folder, or a file that
-//! isn't the page's (an extension [`EXTENSIONS`] doesn't have), is never read.
+//! shows the screen too. No page's files are served: only the viewer's own HTML, its frames and the mouse.
+//!
+//! Frames are read back only while a viewer is asking for them ([`watching`]) and the settings' rate hasn't been
+//! reached yet ([`wants_frame`]), and are encoded only when one has changed (the latest raw frame is all that's
+//! kept): an idle screen, or none watching, costs nothing.
 
-use std::collections::VecDeque;
-use std::io::{self, Read};
+use std::collections::{HashMap, VecDeque};
+use std::io::Read;
 use std::net::{IpAddr, UdpSocket};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use image::ExtendedColorType;
+use image::codecs::jpeg::JpegEncoder;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use crate::settings::MirrorSettings;
 
-/// The messages queued for one mirrored page: a page that falls this far behind (its connection stuck) is let go
-/// rather than holding the host's messages (`broadcast`).
-const CLIENT_QUEUE: usize = 512;
+/// The frame the cabin page is captured at: the screen the game copies into its textures.
+const FRAME_WIDTH: u32 = westplay_shared::SCREEN_WIDTH;
+const FRAME_HEIGHT: u32 = westplay_shared::SCREEN_HEIGHT;
 
-/// How often a quiet SSE connection is told it's still there, so a connection gone (or a proxy between) is found.
-const PING_EVERY: Duration = Duration::from_secs(15);
+/// The most of a mouse event's body read (`POST /api/input`).
+const INPUT_BODY_MAX: u64 = 4 * 1024;
 
-/// The most of a `POST /api/page` body read: a PageMessage is a few KB at most.
-const PAGE_BODY_MAX: u64 = 256 * 1024;
+/// The mouse events waiting for the host: the newest kept if more come than it takes.
+const INPUTS_MAX: usize = 64;
 
-/// The most PageMessages waiting for the host: the oldest go if the host falls behind (a page sends its state
-/// anew as it loads, and a message is one change of the page's).
-const PAGE_MESSAGES_MAX: usize = 256;
+/// How long a frame request waits for a newer frame before it's told there is none (204), and asks again.
+const FRAME_WAIT: Duration = Duration::from_millis(1500);
 
-/// The files the page may ask for, by extension: its page and scripts, its styles and data, its images and fonts,
-/// the map's tiles, and the player's own wallpapers and icon sets (`customize`'s kinds, BMP wallpapers among them).
-/// Nothing else is ever read.
-const EXTENSIONS: [&str; 18] = [
-    "html", "js", "css", "json", "svg", "png", "jpg", "jpeg", "webp", "gif", "bmp", "woff", "woff2", "ttf", "pbf",
-    "bin", "txt", "map",
-];
+/// How long a viewer counts after its last request (`Status`'s `clients`, [`watching`]): a closed tab asks no more.
+const CLIENT_KEEP: Duration = Duration::from_secs(5);
 
-/// What the mirrored page is served from: the page's folder (a built UI, as the cabin's WebView serves it), or the
-/// dev server (a UI being developed), and the host's data folder (the maps, wallpapers and music covers, which the
-/// WebView maps to their own hosts and this serves under `/maps`, `/customize` and `/music-covers`).
-pub struct Sources {
-    pub page_root: Option<PathBuf>,
-    pub dev_url: Option<String>,
-    pub data_dir: PathBuf,
-}
-
-/// A running mirror, until dropped (or [`Mirror::stop`]): its listener, the thread taking requests, and where the
-/// page can be reached. Dropping it stops the listener.
+/// What the mirrored screen is served from: the settings the listener was started with (the frames' quality and rate
+/// are read when they're encoded, so they change without a restart).
 pub struct Mirror {
     server: Arc<Server>,
     accept: Mutex<Option<thread::JoinHandle<()>>>,
     pub port: u16,
     pub lan: bool,
-    /// The page, as a browser on this PC opens it.
+    /// The viewer, as a browser on this PC opens it.
     pub local_url: String,
     /// The same at this PC's address on the network (`None`: the LAN is off, or the PC has no address to find).
     pub lan_url: Option<String>,
@@ -73,59 +62,101 @@ pub struct Mirror {
     pub error: Option<String>,
 }
 
-/// What a request is answered from: the settings it was started with, and the files it serves.
+/// What a request is answered from: the listener's port and network, as the viewer's page is told (`GET /api/info`).
 struct Context {
     port: u16,
     lan: bool,
-    page_root: Option<PathBuf>,
-    dev_url: Option<String>,
-    data_dir: PathBuf,
 }
 
-/// One SSE connection: its id (to drop just it when it ends) and the host's messages queued for it.
-struct Client {
-    id: u64,
-    messages: SyncSender<String>,
+/// A captured frame waiting to be encoded, and the newer one that would replace it.
+struct Raw {
+    /// The frame's number, the viewer's `after` (`X-Seq` in the answer).
+    seq: u64,
+    width: u32,
+    height: u32,
+    bgra: Vec<u8>,
 }
 
-/// An SSE connection's body: the messages the host sends, a ping every so often, and first `: connected`. It
-/// blocks in `read` for its messages, which is what keeps the response open.
-struct Events {
-    messages: Receiver<String>,
-    /// The bytes of one event not handed over yet, and how many of them are.
-    pending: Vec<u8>,
-    sent: usize,
-    connected: bool,
-    done: bool,
+/// One slot, and the threads waiting for something to be put in it: a new raw frame for the encoder, a new JPEG
+/// for the frame requests. Only the newest is kept.
+struct Inbox<T> {
+    slot: Mutex<Option<T>>,
+    ready: Condvar,
 }
 
-/// The SSE connections of the running mirror. `broadcast` sends the host's messages to all of them; one whose
-/// queue is full or gone is dropped. Empty while no mirror runs, so every call is safe then.
-static CLIENTS: OnceLock<Mutex<Vec<Client>>> = OnceLock::new();
+impl<T> Inbox<T> {
+    fn new() -> Self {
+        Self { slot: Mutex::new(None), ready: Condvar::new() }
+    }
 
-/// The PageMessages the mirrored pages posted, for the host to take ([`take_page_messages`]).
-static PAGE_MESSAGES: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
+    fn lock(&self) -> MutexGuard<'_, Option<T>> {
+        self.slot.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
-/// The id of the next SSE connection.
-static NEXT_CLIENT: AtomicU64 = AtomicU64::new(1);
+    fn wait<'a>(&self, slot: MutexGuard<'a, Option<T>>) -> MutexGuard<'a, Option<T>> {
+        self.ready.wait(slot).unwrap_or_else(|e| e.into_inner())
+    }
 
-/// Starts serving the page on `settings`'s port, on 127.0.0.1 or (the LAN on) on every adapter. The caller stops
+    fn wait_timeout<'a>(&self, slot: MutexGuard<'a, Option<T>>, timeout: Duration) -> MutexGuard<'a, Option<T>> {
+        self.ready.wait_timeout(slot, timeout).unwrap_or_else(|e| e.into_inner()).0
+    }
+
+    fn notify(&self) {
+        self.ready.notify_all();
+    }
+}
+
+/// The frames captured and waiting to be encoded (the newest only), and the frames encoded and waiting for the
+/// viewers (the newest, with its number).
+static RAW: OnceLock<Inbox<Raw>> = OnceLock::new();
+static LATEST: OnceLock<Inbox<(u64, Arc<Vec<u8>>)>> = OnceLock::new();
+
+/// The frame being read back, its number.
+static SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// The frames' quality and rate (`Arc<AtomicU8>` as the settings say: written as they change, read as frames go).
+static QUALITY: AtomicU8 = AtomicU8::new(crate::settings::DEFAULT_MIRROR_QUALITY);
+static FPS: AtomicU8 = AtomicU8::new(crate::settings::DEFAULT_MIRROR_FPS);
+
+/// When the last frame was read back, for [`wants_frame`].
+static READ_BACK: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+
+/// The viewers that asked for a frame lately, by their own id: their number is the status's `clients`.
+static CLIENTS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+
+/// The mouse events the viewers sent, for the host to take ([`take_inputs`]).
+static INPUTS: OnceLock<Mutex<VecDeque<InputEvent>>> = OnceLock::new();
+
+fn raw() -> &'static Inbox<Raw> {
+    RAW.get_or_init(Inbox::new)
+}
+
+fn latest() -> &'static Inbox<(u64, Arc<Vec<u8>>)> {
+    LATEST.get_or_init(Inbox::new)
+}
+
+fn read_back_at() -> &'static Mutex<Option<Instant>> {
+    READ_BACK.get_or_init(|| Mutex::new(None))
+}
+
+fn clients() -> &'static Mutex<HashMap<String, Instant>> {
+    CLIENTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn inputs() -> &'static Mutex<VecDeque<InputEvent>> {
+    INPUTS.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+/// Starts serving the frames on `settings`'s port, on 127.0.0.1 or (the LAN on) on every adapter. The caller stops
 /// the previous mirror first: it may hold the same port.
-pub fn start(settings: &MirrorSettings, sources: &Sources) -> Result<Mirror, String> {
-    let address = if settings.lan {
-        format!("0.0.0.0:{}", settings.port)
-    } else {
-        format!("127.0.0.1:{}", settings.port)
-    };
+pub fn start(settings: &MirrorSettings) -> Result<Mirror, String> {
+    configure(settings);
+    let address =
+        if settings.lan { format!("0.0.0.0:{}", settings.port) } else { format!("127.0.0.1:{}", settings.port) };
     let server = Server::http(address.as_str()).map_err(|error| format!("can't listen on {address}: {error}"))?;
+    encode_frames();
     let server = Arc::new(server);
-    let context = Arc::new(Context {
-        port: settings.port,
-        lan: settings.lan,
-        page_root: sources.page_root.clone(),
-        dev_url: sources.dev_url.clone(),
-        data_dir: sources.data_dir.clone(),
-    });
+    let context = Arc::new(Context { port: settings.port, lan: settings.lan });
     let serving = server.clone();
     let accept = thread::Builder::new()
         .name("mirror".into())
@@ -159,16 +190,18 @@ pub fn start(settings: &MirrorSettings, sources: &Sources) -> Result<Mirror, Str
 }
 
 impl Mirror {
-    /// How many mirrored pages are listening for the host's messages now.
+    /// How many viewers asked for a frame lately.
     pub fn clients(&self) -> usize {
         client_count()
     }
 
     /// Stops the listener: `unblock` is how tiny_http ends an `incoming_requests` loop from another thread, and
-    /// the accept thread joins after it. The pages' connections are let go too.
+    /// the accept thread joins after it. Nothing is watched or encoded any more once it's gone.
     pub fn stop(&self) {
         self.server.unblock();
-        close_clients();
+        clients().lock().unwrap_or_else(|e| e.into_inner()).clear();
+        *raw().lock() = None;
+        *latest().lock() = None;
         if let Some(accept) = self.accept.lock().unwrap_or_else(|e| e.into_inner()).take() {
             let _ = accept.join();
         }
@@ -181,70 +214,176 @@ impl Drop for Mirror {
     }
 }
 
-/// Sends one of the host's messages to every mirrored page, as `data: <json>`. Nothing goes anywhere while no
-/// page is connected, so it's safe to call whether a mirror runs or not.
-pub fn broadcast(json: &str) {
-    let mut clients = client_list().lock().unwrap_or_else(|e| e.into_inner());
-    // A connection whose queue is full (its page isn't reading) or gone is dropped: nothing more is sent to it.
-    clients.retain_mut(|client| client.messages.try_send(json.to_owned()).is_ok());
+/// The frames' quality and rate from now on, as the settings changed (no restart: the encoder reads them).
+pub fn configure(settings: &MirrorSettings) {
+    let quality = settings.quality.clamp(MirrorSettings::MIN_QUALITY, MirrorSettings::MAX_QUALITY);
+    let fps = settings.fps.clamp(MirrorSettings::MIN_FPS, MirrorSettings::MAX_FPS);
+    QUALITY.store(quality, Ordering::Relaxed);
+    FPS.store(fps, Ordering::Relaxed);
 }
 
-/// The PageMessages the mirrored pages posted since the last call, oldest first.
-pub fn take_page_messages() -> Vec<String> {
-    let Some(messages) = PAGE_MESSAGES.get() else { return Vec::new() };
-    let mut messages = messages.lock().unwrap_or_else(|e| e.into_inner());
-    messages.drain(..).collect()
+/// Whether someone is watching the screen now (a viewer asked for a frame within [`CLIENT_KEEP`]).
+pub fn watching() -> bool {
+    client_count() > 0
 }
 
-/// The list of SSE connections, made on first use (or before: no mirror yet).
-fn client_list() -> &'static Mutex<Vec<Client>> {
-    CLIENTS.get_or_init(|| Mutex::new(Vec::new()))
-}
-
+/// How many viewers asked for a frame within [`CLIENT_KEEP`].
 fn client_count() -> usize {
-    CLIENTS.get().map_or(0, |clients| clients.lock().unwrap_or_else(|e| e.into_inner()).len())
+    let mut clients = clients().lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    clients.retain(|_, asked| now.saturating_duration_since(*asked) <= CLIENT_KEEP);
+    clients.len()
 }
 
-/// Registers a new SSE connection, then tells the host a page has just connected (a `ready` PageMessage, as the
-/// cabin page posts when it loads): the host sends the current state again, and this connection is in the list
-/// before that message is even queued, so none of the state sent again is missed.
-fn subscribe() -> (u64, Receiver<String>) {
-    let id = NEXT_CLIENT.fetch_add(1, Ordering::Relaxed);
-    let (messages, receiver) = mpsc::sync_channel(CLIENT_QUEUE);
+/// Whether the frames' rate allows another one to be read back now (the last was at least 1/[`FPS`] ago).
+pub fn wants_frame() -> bool {
+    let interval = Duration::from_secs_f32(1.0 / f32::from(FPS.load(Ordering::Relaxed).max(1)));
+    let read_back = read_back_at().lock().unwrap_or_else(|e| e.into_inner());
+    read_back.is_none_or(|at| at.elapsed() >= interval)
+}
+
+/// A new frame of the screen's, as BGRA, from the host's capture (called with the shared texture's lock held): the
+/// encoder takes it, and the viewers get it when it's a JPEG.
+pub fn publish_frame(width: u32, height: u32, bgra: &[u8]) {
+    *read_back_at().lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let inbox = raw();
     {
-        let mut clients = client_list().lock().unwrap_or_else(|e| e.into_inner());
-        clients.push(Client { id, messages });
+        let mut raw = inbox.lock();
+        let fits = |frame: &Raw| frame.width == width && frame.height == height && frame.bgra.len() == bgra.len();
+        if let Some(frame) = raw.as_mut() {
+            if fits(frame) {
+                frame.seq = seq;
+                frame.bgra.copy_from_slice(bgra);
+            } else {
+                *frame = Raw { seq, width, height, bgra: bgra.to_vec() };
+            }
+        } else {
+            *raw = Some(Raw { seq, width, height, bgra: bgra.to_vec() });
+        }
     }
-    push_page_message(r#"{"type":"ready"}"#.to_owned());
-    (id, receiver)
+    inbox.notify();
 }
 
-fn unsubscribe(id: u64) {
-    client_list().lock().unwrap_or_else(|e| e.into_inner()).retain(|client| client.id != id);
+/// The mouse events the viewers sent since the last call, oldest first.
+pub fn take_inputs() -> Vec<InputEvent> {
+    inputs().lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect()
 }
 
-/// Lets every page's connection go (its `read` sees the channel gone and ends the response).
-fn close_clients() {
-    if let Some(clients) = CLIENTS.get() {
-        clients.lock().unwrap_or_else(|e| e.into_inner()).clear();
+/// One mouse event of the mirrored page: its point the frame's pixels (0 to 1279 across, 0 to 719 down), as the
+/// viewer sends it after working the picture out.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum InputEvent {
+    Move { x: i32, y: i32 },
+    Down { x: i32, y: i32, button: Button },
+    Up { x: i32, y: i32, button: Button },
+    Wheel { x: i32, y: i32, delta: i32 },
+}
+
+/// Which of the mouse's buttons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Button {
+    Left,
+    Right,
+    Middle,
+}
+
+impl InputEvent {
+    /// The event kept on the frame: a point past an edge takes the edge's pixel.
+    fn clamped(self) -> Self {
+        let (width, height) = (FRAME_WIDTH as i32 - 1, FRAME_HEIGHT as i32 - 1);
+        let point = |x: i32, y: i32| (x.clamp(0, width), y.clamp(0, height));
+        match self {
+            Self::Move { x, y } => {
+                let (x, y) = point(x, y);
+                Self::Move { x, y }
+            }
+            Self::Down { x, y, button } => {
+                let (x, y) = point(x, y);
+                Self::Down { x, y, button }
+            }
+            Self::Up { x, y, button } => {
+                let (x, y) = point(x, y);
+                Self::Up { x, y, button }
+            }
+            Self::Wheel { x, y, delta } => {
+                let (x, y) = point(x, y);
+                Self::Wheel { x, y, delta }
+            }
+        }
     }
 }
 
-fn push_page_message(json: String) {
-    let messages = PAGE_MESSAGES.get_or_init(|| Mutex::new(VecDeque::new()));
-    let mut messages = messages.lock().unwrap_or_else(|e| e.into_inner());
-    if messages.len() >= PAGE_MESSAGES_MAX {
-        messages.pop_front();
+/// Starts the encoder thread, once: the settings' frames go out from it, the host's loop only leaves frames for it.
+fn encode_frames() {
+    static STARTED: OnceLock<()> = OnceLock::new();
+    STARTED.get_or_init(|| {
+        let _ = thread::Builder::new().name("mirror encoder".into()).spawn(encode_loop);
+    });
+}
+
+/// Encodes the newest raw frame, at the settings' rate and quality, for the viewers waiting.
+fn encode_loop() {
+    let raw = raw();
+    let latest = latest();
+    let mut next = Instant::now();
+    let mut rgb = Vec::new();
+    loop {
+        let frame = {
+            let mut slot = raw.lock();
+            loop {
+                if let Some(frame) = slot.take() {
+                    break frame;
+                }
+                slot = raw.wait(slot);
+            }
+        };
+        // At most the settings' frames a second: while this one waits, a newer replaces it (and is the one encoded).
+        let interval = Duration::from_secs_f32(1.0 / f32::from(FPS.load(Ordering::Relaxed).max(1)));
+        let now = Instant::now();
+        if next > now {
+            thread::sleep(next - now);
+        }
+        let frame = {
+            let mut slot = raw.lock();
+            slot.take().unwrap_or(frame)
+        };
+        next = Instant::now() + interval;
+        let quality = QUALITY.load(Ordering::Relaxed).clamp(MirrorSettings::MIN_QUALITY, MirrorSettings::MAX_QUALITY);
+        let Some(jpeg) = jpeg(frame.width, frame.height, &frame.bgra, quality, &mut rgb) else { continue };
+        {
+            let mut slot = latest.lock();
+            *slot = Some((frame.seq, Arc::new(jpeg)));
+        }
+        latest.notify();
     }
-    messages.push_back(json);
+}
+
+/// The frame as a JPEG (`None`: not the frame's size as BGRA, or the encoder refused it, and the next is taken).
+fn jpeg(width: u32, height: u32, bgra: &[u8], quality: u8, rgb: &mut Vec<u8>) -> Option<Vec<u8>> {
+    if bgra.len() != width as usize * height as usize * 4 {
+        return None;
+    }
+    rgb.clear();
+    rgb.reserve((width as usize * height as usize) * 3);
+    for pixel in bgra.chunks_exact(4) {
+        rgb.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+    }
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, quality)
+        .encode(rgb.as_slice(), width, height, ExtendedColorType::Rgb8)
+        .ok()?;
+    Some(jpeg)
 }
 
 fn serve(request: Request, context: &Context) {
     let url = request.url().to_owned();
-    let path = url.split('?').next().unwrap_or_default();
+    let path = url.split('?').next().unwrap_or_default().to_owned();
     if request.method() == &Method::Post {
-        if path == "/api/page" {
-            post_page(request);
+        if path == "/api/input" {
+            post_input(request);
         } else {
             let _ = request.respond(Response::empty(StatusCode(405)));
         }
@@ -254,278 +393,208 @@ fn serve(request: Request, context: &Context) {
         let _ = request.respond(Response::empty(StatusCode(405)));
         return;
     }
-    match path {
-        "/" => redirect(request),
-        "/cabin.html" => cabin(request, context),
-        "/api/events" => events(request),
+    match path.as_str() {
+        "/" | "/cabin.html" => respond_html(request),
         "/api/info" => info(request, context),
+        "/api/frame" => frame(request, &url),
         _ => {
-            if let Some((folder, rest)) = mapped(path, context) {
-                serve_file(request, &folder, rest);
-            } else if context.dev_url.is_some() {
-                proxy(request, context, &url);
-            } else if let Some(root) = &context.page_root {
-                serve_file(request, root, path);
-            } else {
-                let _ = request.respond(Response::empty(StatusCode(404)));
-            }
+            let _ = request.respond(Response::empty(StatusCode(404)));
         }
     }
 }
 
-fn redirect(request: Request) {
-    let mut response = Response::empty(StatusCode(302));
-    response.add_header(header("Location", "/cabin.html"));
-    let _ = request.respond(response);
-}
-
-/// The page itself, with the mirror's script injected: from the dev server when there is one (a UI being
-/// developed), otherwise the page's folder.
-fn cabin(request: Request, context: &Context) {
-    if let Some(dev_url) = &context.dev_url {
-        let Some(target) = dev_target(dev_url, request.url()) else {
-            let _ = request.respond(Response::empty(StatusCode(502)));
-            return;
-        };
-        let Some(response) = fetch(&target) else {
-            let _ = request.respond(Response::empty(StatusCode(502)));
-            return;
-        };
-        let status = StatusCode(response.status().as_u16());
-        let Ok(html) = response.text() else {
-            let _ = request.respond(Response::empty(StatusCode(502)));
-            return;
-        };
-        respond_html(request, status, with_mirror(&html, context.port));
-        return;
+/// The viewer itself: a black page showing the frames, its mouse sent back. Two lines of text until the first
+/// frame comes (no i18n: this page is the mirror's own, not the cabin page's).
+const VIEWER: &str = r##"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>WestPlay</title>
+<style>
+html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;cursor:none}
+img{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;cursor:none;pointer-events:auto;-webkit-user-drag:none}
+#hint{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.5em;color:#9aa4ad;font:15px/1.5 system-ui,sans-serif;text-align:center;pointer-events:none}
+#hint[hidden]{display:none}
+</style>
+</head>
+<body>
+<img id="frame" alt="" draggable="false">
+<div id="hint">Waiting for the truck's screen…<br>正在等待车机画面…</div>
+<script>
+(() => {
+  'use strict';
+  const W = 1280, H = 720;
+  const img = document.getElementById('frame');
+  const hint = document.getElementById('hint');
+  const key = 'westplayMirrorId';
+  let id = null;
+  try {
+    id = sessionStorage.getItem(key);
+    if (!id) {
+      id = Math.random().toString(36).slice(2) + Date.now().toString(36);
+      sessionStorage.setItem(key, id);
     }
-    let Some(root) = &context.page_root else {
-        let _ = request.respond(Response::empty(StatusCode(404)));
-        return;
-    };
-    let Ok(html) = std::fs::read_to_string(root.join("cabin.html")) else {
-        let _ = request.respond(Response::empty(StatusCode(404)));
-        return;
-    };
-    respond_html(request, StatusCode(200), with_mirror(&html, context.port));
-}
-
-fn events(request: Request) {
-    let (id, messages) = subscribe();
-    let headers = vec![header("Content-Type", "text/event-stream"), header("Cache-Control", "no-cache")];
-    let body = Events { messages, pending: Vec::new(), sent: 0, connected: false, done: false };
-    // No length: the response is chunked, each event sent as it comes.
-    let _ = request.respond(Response::new(StatusCode(200), headers, body, None, None));
-    unsubscribe(id);
-}
-
-fn post_page(mut request: Request) {
-    let mut body = Vec::new();
-    if request.as_reader().take(PAGE_BODY_MAX).read_to_end(&mut body).is_err() {
-        let _ = request.respond(Response::empty(StatusCode(400)));
-        return;
+  } catch (e) {
+    // Storage refused (a private tab): a name for this page alone.
+    id = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  }
+  let seq = 0;
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  async function frames() {
+    for (;;) {
+      let response;
+      try {
+        response = await fetch('/api/frame?after=' + seq + '&id=' + encodeURIComponent(id), { cache: 'no-store' });
+      } catch (e) {
+        await sleep(500);
+        continue;
+      }
+      if (response.status === 204) continue;
+      if (!response.ok) {
+        await sleep(500);
+        continue;
+      }
+      seq = Number(response.headers.get('X-Seq') || seq + 1);
+      const url = URL.createObjectURL(await response.blob());
+      const old = img.src;
+      img.src = url;
+      if (old.indexOf('blob:') === 0) URL.revokeObjectURL(old);
     }
-    let Ok(body) = String::from_utf8(body) else {
-        let _ = request.respond(Response::empty(StatusCode(400)));
-        return;
+  }
+  img.addEventListener('load', () => { hint.hidden = true; });
+  const clamp = (value, size) => Math.min(Math.max(Math.round(value), 0), size - 1);
+  function point(event) {
+    const scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+    return {
+      x: clamp((event.clientX - (window.innerWidth - W * scale) / 2) / scale, W),
+      y: clamp((event.clientY - (window.innerHeight - H * scale) / 2) / scale, H),
     };
-    if serde_json::from_str::<serde_json::Value>(&body).is_err() {
-        let _ = request.respond(Response::empty(StatusCode(400)));
-        return;
-    }
-    push_page_message(body);
-    let _ = request.respond(Response::empty(StatusCode(204)));
+  }
+  function send(event) {
+    fetch('/api/input', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(event),
+      keepalive: true,
+    }).catch(() => {});
+  }
+  const button = (pressed) => pressed === 0 ? 'left' : pressed === 1 ? 'middle' : 'right';
+  addEventListener('pointermove', (event) => {
+    const p = point(event);
+    send({ type: 'move', x: p.x, y: p.y });
+  }, { passive: true });
+  addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    const p = point(event);
+    send({ type: 'down', x: p.x, y: p.y, button: button(event.button) });
+  }, { passive: false });
+  const up = (event) => {
+    event.preventDefault();
+    const p = point(event);
+    send({ type: 'up', x: p.x, y: p.y, button: button(event.button) });
+  };
+  addEventListener('pointerup', up, { passive: false });
+  addEventListener('pointercancel', up, { passive: false });
+  addEventListener('wheel', (event) => {
+    event.preventDefault();
+    const p = point(event);
+    // Up the page negative, in the 120s a wheel notch is (the page's own sign; the host turns it for Win32).
+    send({ type: 'wheel', x: p.x, y: p.y, delta: event.deltaY < 0 ? -120 : 120 });
+  }, { passive: false });
+  addEventListener('contextmenu', (event) => event.preventDefault());
+  frames();
+})();
+</script>
+</body>
+</html>
+"##;
+
+fn respond_html(request: Request) {
+    let headers = vec![header("Content-Type", "text/html; charset=utf-8"), header("Cache-Control", "no-store")];
+    let _ = request.respond(Response::new(StatusCode(200), headers, VIEWER.as_bytes(), Some(VIEWER.len()), None));
 }
 
 fn info(request: Request, context: &Context) {
-    let body = serde_json::json!({ "port": context.port, "lan": context.lan }).to_string();
-    let length = body.len();
+    let body = serde_json::json!({
+        "port": context.port,
+        "lan": context.lan,
+        "quality": QUALITY.load(Ordering::Relaxed),
+        "fps": FPS.load(Ordering::Relaxed),
+        "width": FRAME_WIDTH,
+        "height": FRAME_HEIGHT,
+    })
+    .to_string();
     let headers = vec![header("Content-Type", "application/json"), header("Cache-Control", "no-store")];
-    let body = io::Cursor::new(body.into_bytes());
-    let _ = request.respond(Response::new(StatusCode(200), headers, body, Some(length), None));
+    let _ = request.respond(Response::new(StatusCode(200), headers, body.as_bytes(), Some(body.len()), None));
 }
 
-/// A file the page asks for from its folder (folder mode), or a file of the host's data folders.
-fn serve_file(request: Request, root: &Path, path: &str) {
-    let Some(file) = file_in(root, path) else {
-        let _ = request.respond(Response::empty(StatusCode(404)));
-        return;
-    };
-    let Ok(data) = std::fs::read(&file) else {
-        let _ = request.respond(Response::empty(StatusCode(404)));
-        return;
-    };
-    let length = data.len();
-    let headers = vec![header("Content-Type", content_type(&file)), header("Cache-Control", "no-store")];
-    let data = io::Cursor::new(data);
-    let _ = request.respond(Response::new(StatusCode(200), headers, data, Some(length), None));
-}
-
-/// Whatever the dev server answers for the path and its query, passed on as it came (its `Content-Type` kept:
-/// scripts, styles, images), so the page in the mirror is the one being developed.
-fn proxy(request: Request, context: &Context, url: &str) {
-    let Some(dev_url) = &context.dev_url else {
-        let _ = request.respond(Response::empty(StatusCode(404)));
-        return;
-    };
-    let Some(target) = dev_target(dev_url, url) else {
-        let _ = request.respond(Response::empty(StatusCode(502)));
-        return;
-    };
-    let Some(response) = fetch(&target) else {
-        let _ = request.respond(Response::empty(StatusCode(502)));
-        return;
-    };
-    let status = StatusCode(response.status().as_u16());
-    let mut headers = vec![header("Cache-Control", "no-store")];
-    if let Some(kind) = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()) {
-        headers.push(header("Content-Type", kind));
+/// The newest frame, waited for up to [`FRAME_WAIT`]: `200 image/jpeg` with `X-Seq` its number, or `204` when no
+/// frame newer than `after` came. The `id` is how a viewer is told apart (the status's `clients`).
+fn frame(request: Request, url: &str) {
+    let after = query(url, "after").and_then(|after| after.parse().ok()).unwrap_or(0);
+    let id = query(url, "id").filter(|id| !id.is_empty()).unwrap_or("anonymous").to_owned();
+    {
+        let mut clients = clients().lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        clients.retain(|_, asked| now.saturating_duration_since(*asked) <= CLIENT_KEEP);
+        clients.insert(id, now);
     }
-    let length = response
-        .headers()
-        .get(reqwest::header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<usize>().ok());
-    let response = Response::new(status, headers, response, length, None);
-    let _ = request.respond(response);
-}
-
-impl Read for Events {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        if self.done || buffer.is_empty() {
-            return Ok(0);
+    let inbox = latest();
+    let mut latest = inbox.lock();
+    let deadline = Instant::now() + FRAME_WAIT;
+    loop {
+        if let Some((seq, jpeg)) = latest.as_ref()
+            && *seq > after
+        {
+            let (seq, jpeg) = (*seq, Arc::clone(jpeg));
+            drop(latest);
+            let headers = vec![
+                header("Content-Type", "image/jpeg"),
+                header("Cache-Control", "no-store"),
+                header("X-Seq", &seq.to_string()),
+            ];
+            let _ = request.respond(Response::new(StatusCode(200), headers, &jpeg[..], Some(jpeg.len()), None));
+            return;
         }
-        loop {
-            if self.sent < self.pending.len() {
-                let left = &self.pending[self.sent..];
-                let count = left.len().min(buffer.len());
-                buffer[..count].copy_from_slice(&left[..count]);
-                self.sent += count;
-                if self.sent == self.pending.len() {
-                    self.pending.clear();
-                    self.sent = 0;
-                }
-                return Ok(count);
-            }
-            self.pending.clear();
-            self.sent = 0;
-            if !self.connected {
-                self.connected = true;
-                self.pending = b": connected\n\n".to_vec();
-                continue;
-            }
-            match self.messages.recv_timeout(PING_EVERY) {
-                Ok(json) => self.pending = format!("data: {json}\n\n").into_bytes(),
-                Err(RecvTimeoutError::Timeout) => self.pending = b": ping\n\n".to_vec(),
-                Err(RecvTimeoutError::Disconnected) => {
-                    self.done = true;
-                    return Ok(0);
-                }
-            }
+        let now = Instant::now();
+        let Some(left) = deadline.checked_duration_since(now) else {
+            drop(latest);
+            let _ = request.respond(Response::empty(StatusCode(204)));
+            return;
+        };
+        latest = inbox.wait_timeout(latest, left);
+    }
+}
+
+/// A mouse event of the viewer's (`POST /api/input`): checked, and queued for the host's loop.
+fn post_input(mut request: Request) {
+    let mut body = Vec::new();
+    if request.as_reader().take(INPUT_BODY_MAX).read_to_end(&mut body).is_err() {
+        let _ = request.respond(Response::empty(StatusCode(400)));
+        return;
+    }
+    let Ok(input) = serde_json::from_slice::<InputEvent>(&body) else {
+        let _ = request.respond(Response::empty(StatusCode(400)));
+        return;
+    };
+    {
+        let mut inputs = inputs().lock().unwrap_or_else(|e| e.into_inner());
+        if inputs.len() >= INPUTS_MAX {
+            inputs.pop_front();
         }
+        inputs.push_back(input.clamped());
     }
+    let _ = request.respond(Response::empty(StatusCode(204)));
 }
 
-/// The folder a request under `/maps/`, `/customize/` or `/music-covers/` is served from (the same files the
-/// cabin page's WebView maps to their own hosts), and the rest of its path in it.
-fn mapped<'a>(path: &'a str, context: &Context) -> Option<(PathBuf, &'a str)> {
-    if let Some(rest) = path.strip_prefix("/maps/") {
-        Some((context.data_dir.join("maps"), rest))
-    } else if let Some(rest) = path.strip_prefix("/customize/") {
-        Some((context.data_dir.join(crate::customize::FOLDER), rest))
-    } else if let Some(rest) = path.strip_prefix("/music-covers/") {
-        Some((context.data_dir.join("music-covers"), rest))
-    } else {
-        None
-    }
-}
-
-/// A file of `root` for a request's path (`/assets/app.js`): `None` for a path that tries to leave the folder (a
-/// `..`, an absolute one, a Windows drive or stream), or a file of a kind the page doesn't have.
-///
-/// The browser sends the path percent-encoded (the player's own wallpaper `Dusk (2).dark.jpg` comes as
-/// `Dusk%20(2).dark.jpg`): each segment is decoded first, and checked as it means, so an encoded `..` (`%2e%2e`)
-/// or an encoded `/` (`%2f`) is no way out either.
-fn file_in(root: &Path, path: &str) -> Option<PathBuf> {
-    let mut file = root.to_path_buf();
-    for segment in path.trim_start_matches('/').split('/') {
-        let decoded = percent_encoding::percent_decode_str(segment).decode_utf8().ok()?;
-        // Stated, so `push` needn't choose which of `&str`'s `AsRef`s the decoded segment is.
-        let segment: &str = decoded.as_ref();
-        let outside = segment.is_empty()
-            || segment == "."
-            || segment == ".."
-            || Path::new(segment).is_absolute()
-            || Path::new(segment).has_root()
-            || segment.chars().any(|c| matches!(c, '/' | '\\' | ':' | '\0') || c.is_control());
-        if outside {
-            return None;
-        }
-        file.push(segment);
-    }
-    let extension = file.extension()?.to_str()?.to_ascii_lowercase();
-    if !EXTENSIONS.contains(&extension.as_str()) {
-        return None;
-    }
-    // The file as Windows resolves it, to know it's a file of the folder and not a link out of it.
-    let root = root.canonicalize().ok()?;
-    let file = file.canonicalize().ok()?;
-    (file.starts_with(&root) && file.is_file()).then_some(file)
-}
-
-fn content_type(file: &Path) -> &'static str {
-    let extension = file.extension().and_then(|extension| extension.to_str()).unwrap_or_default().to_ascii_lowercase();
-    match extension.as_str() {
-        "html" => "text/html; charset=utf-8",
-        "js" => "text/javascript; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "json" | "map" => "application/json",
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        "bmp" => "image/bmp",
-        "woff" => "font/woff",
-        "woff2" => "font/woff2",
-        "ttf" => "font/ttf",
-        "pbf" => "application/x-protobuf",
-        "txt" => "text/plain; charset=utf-8",
-        _ => "application/octet-stream",
-    }
-}
-
-/// The page with the mirror's own script before its `</head>` (at its start without one): the page there knows
-/// it's mirrored, and on which port its messages go (`window.__WESTPLAY_MIRROR__`).
-fn with_mirror(html: &str, port: u16) -> String {
-    let script = format!("<script>window.__WESTPLAY_MIRROR__={{\"port\":{port}}}</script>");
-    let at = html.find("</head>").unwrap_or(0);
-    let mut injected = String::with_capacity(html.len() + script.len());
-    injected.push_str(&html[..at]);
-    injected.push_str(&script);
-    injected.push_str(&html[at..]);
-    injected
-}
-
-/// The dev server's URL for a request's path and query (`/cabin.html?v=1`): on the origin `dev_url` names (it
-/// may point at a page).
-fn dev_target(dev_url: &str, url: &str) -> Option<String> {
-    let (scheme, rest) = dev_url.split_once("://")?;
-    let authority = rest.split(['/', '?', '#']).next()?;
-    Some(format!("{scheme}://{authority}{url}"))
-}
-
-/// One GET to the dev server. Straight out, never through the machine's own proxy: one (a VPN's, a capture tool's)
-/// may answer local addresses itself, with something that isn't the page.
-fn fetch(url: &str) -> Option<reqwest::blocking::Response> {
-    reqwest::blocking::Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .ok()?
-        .get(url)
-        .send()
-        .ok()
+/// A query's value (`/api/frame?after=12&id=abc`).
+fn query<'a>(url: &'a str, name: &str) -> Option<&'a str> {
+    let (_, query) = url.split_once('?')?;
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then_some(value)
+    })
 }
 
 /// This PC's address on the network, as it would reach the internet: a `connect` on a UDP socket sends nothing, it
@@ -538,13 +607,6 @@ fn lan_address() -> Option<IpAddr> {
     address.is_ipv4().then_some(address)
 }
 
-fn respond_html(request: Request, status: StatusCode, html: String) {
-    let length = html.len();
-    let headers = vec![header("Content-Type", "text/html; charset=utf-8"), header("Cache-Control", "no-store")];
-    let html = io::Cursor::new(html.into_bytes());
-    let _ = request.respond(Response::new(status, headers, html, Some(length), None));
-}
-
 fn header(name: &str, value: &str) -> Header {
     Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("a plain header")
 }
@@ -554,24 +616,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_the_pages_files_by_their_percent_encoded_names() {
-        let dir = std::env::temp_dir().join(format!("westplay-mirror-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("Dusk (2).dark.jpg"), "jpeg").unwrap();
-        std::fs::write(dir.join("夜色.jpg"), "jpeg").unwrap();
-        // As the page encodes them (`customize.ts`'s `fileUrl`): the spaces, brackets and characters.
-        assert!(file_in(&dir, "/Dusk%20(2).dark.jpg").unwrap().ends_with("Dusk (2).dark.jpg"));
-        assert!(file_in(&dir, "/%E5%A4%9C%E8%89%B2.jpg").unwrap().ends_with("夜色.jpg"));
-        // No way out, encoded or not.
-        let outside = ["/../settings.json", "/%2e%2e/settings.json", "/..%5csettings.json", "/%2e%2e%2fsettings.json"];
-        for path in outside {
-            assert_eq!(file_in(&dir, path), None, "{path}");
+    fn input_json_is_the_mouse_it_says() {
+        let read = |json: &str| serde_json::from_str::<InputEvent>(json).unwrap().clamped();
+        assert_eq!(read(r#"{"type":"move","x":640,"y":360}"#), InputEvent::Move { x: 640, y: 360 });
+        assert_eq!(
+            read(r#"{"type":"down","x":640,"y":360,"button":"left"}"#),
+            InputEvent::Down { x: 640, y: 360, button: Button::Left }
+        );
+        assert_eq!(
+            read(r#"{"type":"up","x":12,"y":34,"button":"right"}"#),
+            InputEvent::Up { x: 12, y: 34, button: Button::Right }
+        );
+        assert_eq!(read(r#"{"type":"wheel","x":1,"y":2,"delta":-120}"#), InputEvent::Wheel { x: 1, y: 2, delta: -120 });
+        // Off the frame: kept on it.
+        assert_eq!(read(r#"{"type":"move","x":-5,"y":9000}"#), InputEvent::Move { x: 0, y: 719 });
+        // Not a mouse event of the kinds the viewer sends.
+        for bad in [r#"{"type":"hover","x":1,"y":2}"#, r#"{"type":"down","x":1,"y":2,"button":"thumb"}"#, "[]"] {
+            assert!(serde_json::from_str::<InputEvent>(bad).is_err(), "{bad}");
         }
-        assert_eq!(file_in(&dir, "/Dusk%20(2).dark.jpg%00"), None);
-        // A kind the page doesn't have ([`EXTENSIONS`] leaves it out), and one that isn't there.
-        std::fs::write(dir.join("movie.mp4"), "video").unwrap();
-        assert_eq!(file_in(&dir, "/movie.mp4"), None);
-        assert_eq!(file_in(&dir, "/missing.jpg"), None);
-        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_viewer_page_pulls_frames_and_sends_the_mouse() {
+        assert!(VIEWER.contains("/api/frame"), "the frames it shows");
+        assert!(VIEWER.contains("/api/input"), "the mouse it sends");
+        assert!(VIEWER.contains("object-fit:contain"), "the picture kept whole");
+        assert!(VIEWER.contains("cursor:none"), "no second cursor over the frame's own");
+        assert!(VIEWER.contains("width=device-width"), "a phone's own width");
+    }
+
+    #[test]
+    fn a_frame_request_says_which_frame_to_wait_after() {
+        assert_eq!(query("/api/frame?after=12&id=abc", "after"), Some("12"));
+        assert_eq!(query("/api/frame?after=12&id=abc", "id"), Some("abc"));
+        assert_eq!(query("/api/frame?after=12", "id"), None);
+        assert_eq!(query("/api/frame", "after"), None);
+    }
+
+    #[test]
+    fn a_frame_is_a_jpeg_of_the_frame_size() {
+        // Two by two, each row blue then white (BGRA).
+        let mut bgra = Vec::new();
+        for _ in 0..2 {
+            bgra.extend_from_slice(&[255, 0, 0, 255]);
+            bgra.extend_from_slice(&[255, 255, 255, 255]);
+        }
+        let mut rgb = Vec::new();
+        let jpeg = jpeg(2, 2, &bgra, 85, &mut rgb).expect("a JPEG");
+        assert_eq!((jpeg[0], jpeg[1]), (0xff, 0xd8), "a JPEG's start");
+        assert_eq!(rgb.len(), 2 * 2 * 3, "the frame's pixels as RGB");
+        assert_eq!((rgb[0], rgb[1], rgb[2]), (0, 0, 255), "BGRA blue to RGB");
     }
 }

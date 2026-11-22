@@ -3,7 +3,7 @@ import type { Customizations } from '../shared/customize'
 import type { Added } from './customize'
 import type { Offer } from './update'
 import type { HostStatus, MapStatus } from './useHostStatus'
-import type { Settings } from './useSettings'
+import { MIRROR_DEFAULT, type Settings } from './useSettings'
 
 /**
  * The companion opened in a plain browser (bridge.ts): the app's answers, made up, so its pages can be
@@ -94,7 +94,7 @@ let settings: Settings = {
     coach: 'driver',
   },
   map: { buildings: true, roads: true, fast: false },
-  mirror: { enabled: mirrorState !== 'off', port: 35421, lan: true },
+  mirror: { ...MIRROR_DEFAULT, enabled: mirrorState !== 'off' },
   language: null,
 }
 

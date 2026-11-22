@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { IN_APP } from '../bridge'
-import { Button, Group, Note, Panel, Row, Status, Switch } from '../room/parts'
+import { Button, Group, Note, Panel, Row, Slider, Status, Switch } from '../room/parts'
 import { GLOW, useScreenAt } from '../room/screen'
-import { MIRROR_DEFAULT, MIRROR_PORT } from '../useSettings'
+import { MIRROR_DEFAULT, MIRROR_FPS, MIRROR_PORT, MIRROR_QUALITY } from '../useSettings'
 import type { PageProps } from './page'
 import type { CompanionWords } from './words'
 import './mirror.css'
@@ -13,10 +13,11 @@ const COPIED_MS = 2000
 const APPLIED_MS = 2000
 
 /**
- * Browser Access: the truck's screen also served by the host in a browser (`westplay_host`), on this PC and,
- * if allowed, on the network. Its addresses, how many pages show it, and the settings that start it: on or off,
- * the port, and whether other devices may open it. Saving hands them to the app (which restarts the mirror);
- * a change takes effect at once, and the status says where it's listening.
+ * Browser Access: the truck's screen itself also served by the host in a browser (`westplay_host`), on this PC
+ * and, if allowed, on the network: the same frame, in sync, where clicks, drags and the wheel work as in the cab.
+ * Its addresses, how many pages show it, and the settings that start it: on or off, the port, whether other
+ * devices may open it, and how large a frame and how many come a second. Saving hands them to the app (which
+ * restarts the mirror); a change takes effect at once, and the status says where it's listening.
  */
 export function MirrorPage({ status, settings: state, cw }: PageProps) {
   const w = cw.mirror
@@ -25,6 +26,8 @@ export function MirrorPage({ status, settings: state, cw }: PageProps) {
   const [enabled, setEnabled] = useState(saved?.enabled ?? MIRROR_DEFAULT.enabled)
   const [port, setPort] = useState(String(saved?.port ?? MIRROR_DEFAULT.port))
   const [lan, setLan] = useState(saved?.lan ?? MIRROR_DEFAULT.lan)
+  const [quality, setQuality] = useState(saved?.quality ?? MIRROR_DEFAULT.quality)
+  const [fps, setFps] = useState(saved?.fps ?? MIRROR_DEFAULT.fps)
   const [copied, setCopied] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [applied, setApplied] = useState(false)
@@ -33,12 +36,14 @@ export function MirrorPage({ status, settings: state, cw }: PageProps) {
   const loaded = useRef('')
   useEffect(() => {
     if (!saved) return
-    const key = `${saved.enabled}|${saved.port}|${saved.lan}`
+    const key = `${saved.enabled}|${saved.port}|${saved.lan}|${saved.quality}|${saved.fps}`
     if (key === loaded.current) return
     loaded.current = key
     setEnabled(saved.enabled)
     setPort(String(saved.port))
     setLan(saved.lan)
+    setQuality(saved.quality)
+    setFps(saved.fps)
   }, [saved])
   useEffect(() => {
     if (!copied) return
@@ -59,8 +64,8 @@ export function MirrorPage({ status, settings: state, cw }: PageProps) {
     Number.isInteger(portNumber) &&
     portNumber >= MIRROR_PORT.min &&
     portNumber <= MIRROR_PORT.max
-  const filled = (text: string) =>
-    text.replace('{min}', String(MIRROR_PORT.min)).replace('{max}', String(MIRROR_PORT.max))
+  const filled = (text: string, range: { min: number; max: number }) =>
+    text.replace('{min}', String(range.min)).replace('{max}', String(range.max))
 
   const copy = (url: string) => {
     const clipboard = navigator.clipboard
@@ -80,7 +85,7 @@ export function MirrorPage({ status, settings: state, cw }: PageProps) {
     setSaving(true)
     setApplied(false)
     // `update` never rejects: a failure is kept in `error`, and the settings read back as they were.
-    void state.update({ ...current, mirror: { enabled, port: portNumber, lan } }).finally(() => {
+    void state.update({ ...current, mirror: { enabled, port: portNumber, lan, quality, fps } }).finally(() => {
       setSaving(false)
       setApplied(true)
     })
@@ -129,7 +134,7 @@ export function MirrorPage({ status, settings: state, cw }: PageProps) {
           <span className="ob-row-text">
             <b>{w.port}</b>
             <span className={portValid ? undefined : 'cp-mirror-invalid'}>
-              {portValid ? filled(w.portDetail) : filled(w.portInvalid)}
+              {portValid ? filled(w.portDetail, MIRROR_PORT) : filled(w.portInvalid, MIRROR_PORT)}
             </span>
           </span>
           <input
@@ -149,6 +154,38 @@ export function MirrorPage({ status, settings: state, cw }: PageProps) {
           detail={w.lanDetail}
           accessory={<Switch on={lan} label={w.lanOn} change={setLan} />}
         />
+        <div className="ob-row cp-slider-row">
+          <span className="ob-row-text">
+            <b>{w.quality}</b>
+            <span>{filled(w.qualityDetail, MIRROR_QUALITY)}</span>
+          </span>
+          <span className="ob-row-value">{`${quality}%`}</span>
+          <Slider
+            value={quality}
+            min={MIRROR_QUALITY.min}
+            max={MIRROR_QUALITY.max}
+            step={MIRROR_QUALITY.step}
+            label={w.quality}
+            change={setQuality}
+            commit={setQuality}
+          />
+        </div>
+        <div className="ob-row cp-slider-row">
+          <span className="ob-row-text">
+            <b>{w.fps}</b>
+            <span>{filled(w.fpsDetail, MIRROR_FPS)}</span>
+          </span>
+          <span className="ob-row-value">{`${fps} fps`}</span>
+          <Slider
+            value={fps}
+            min={MIRROR_FPS.min}
+            max={MIRROR_FPS.max}
+            step={MIRROR_FPS.step}
+            label={w.fps}
+            change={setFps}
+            commit={setFps}
+          />
+        </div>
       </Group>
       {state.error && <Note tone="bad">{w.saveFailed.replace('{error}', state.error)}</Note>}
       {applied && !state.error && <p className="cp-mirror-applied ob-in">{w.saved}</p>}

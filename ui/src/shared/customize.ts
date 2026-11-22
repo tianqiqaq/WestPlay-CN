@@ -1,4 +1,3 @@
-import { customizeBase } from './bases'
 import type { AppIconRole } from './icons'
 
 /**
@@ -31,18 +30,10 @@ export type IconStyle = 'auto' | 'light' | 'dark'
 
 export const NO_CUSTOMIZATIONS: Customizations = { wallpapers: [], iconSets: [] }
 
-/** Where the cabin page finds the player's files in the host: the host maps the folder there. Kept for what reads
- * the host's address itself; the page asks `cabinFiles()`, which follows the page's own address when the host
- * mirrors it to a plain browser. */
+/** Where the cabin page finds the player's files (the host maps the folder there). */
 export const CABIN_FILES = 'https://westplay.customize/'
 /** Where the companion finds them (the app's `westplay-customize` scheme, as WebView2 addresses it). */
 export const COMPANION_FILES = 'http://westplay-customize.localhost/'
-
-/** Where this page finds the player's files: the host's virtual host, or the mirror server's own path in a page the
- * host mirrors to a plain browser (shared/bases.ts). Read when it's used, not when this module loads. */
-export function cabinFiles(): string {
-  return customizeBase()
-}
 
 /** A file's address at `base`: each part of its path encoded (names have spaces, brackets, any letters). */
 export function fileUrl(base: string, path: string): string {

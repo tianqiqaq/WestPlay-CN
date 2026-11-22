@@ -55,13 +55,13 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use westplay_shared::{BridgeMapping, JobInfo, Keybind, Telemetry, TruckInfo, screen_layouts};
-use windows::Win32::Foundation::LUID;
+use windows::Win32::Foundation::{LUID, POINT};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage};
 
 use capture::Capture;
 use gpu::{Gpu, SharedFrame};
-use mirror::{Mirror, Sources};
+use mirror::{Button, InputEvent, Mirror};
 use player::{PartSpeakers, Player, PlayerWatch};
 use pointer::Pointer;
 use route::{RouteUpdate, RouteWatch};
@@ -322,25 +322,10 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
     let music_covers = config.data_dir.join("music-covers");
     let _ = std::fs::create_dir_all(&music_covers);
     webview.map_folder_to_any_page(music_folder::COVERS_HOST, &music_covers)?;
-    // The cabin page mirrored on a local port (mirror.rs): the same page, for the player's phone or tablet beside
-    // the truck's screen. Only a page from a folder or a dev server is mirrored; the built-in test page isn't.
-    let mirror_sources = match &config.content {
-        Content::Folder { root, .. } => {
-            Some(Sources { page_root: Some(root.clone()), dev_url: None, data_dir: config.data_dir.clone() })
-        }
-        Content::Url(url) => {
-            Some(Sources { page_root: None, dev_url: Some(url.clone()), data_dir: config.data_dir.clone() })
-        }
-        Content::Html(_) => None,
-    };
+    // The cabin page's frames mirrored on a local port (mirror.rs): the same picture the truck's screen shows, for
+    // the player's phone or tablet beside it, its mouse taken back into the page.
     let mut mirror_settings = config.settings.get().mirror.clamped();
-    let (mut mirror, mut mirror_error) = match &mirror_sources {
-        Some(sources) => {
-            webview.set_mirrors(true);
-            start_mirror(&mirror_settings, sources)
-        }
-        None => (None, None),
-    };
+    let (mut mirror, mut mirror_error) = start_mirror(&mirror_settings);
     let music_watch = music_folder::FolderWatch::start(music_covers);
     // Safari: its tabs' pictures for its tab overview (safari.rs).
     let safari_pictures = config.data_dir.join("safari-tabs");
@@ -363,7 +348,7 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
         webview_version: webview.version.clone(),
         cab_adapter: cab_gpu.and_then(|luid| graphics::name_of(luid, &adapters)),
         adapters: adapters.clone(),
-        mirror: mirror_status(mirror.as_ref(), &mirror_settings, mirror_sources.as_ref(), mirror_error.as_deref()),
+        mirror: mirror_status(mirror.as_ref(), &mirror_settings, mirror_error.as_deref()),
         ..Default::default()
     };
 
@@ -405,6 +390,9 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
         height: config.height,
     };
     let mut pointer = Pointer::new(config.width, config.height);
+    // The buttons held by the player's phone or tablet (mirror.rs's `InputEvent`s run into the page as WebView2
+    // mouse input): which, as WebView2's virtual keys say.
+    let mut mirror_keys = 0i32;
     // The screen's cursor, drawn into the frames the game takes (cursor.rs), and whether the page was last told the
     // host draws it (`None`: not told since it loaded).
     let mut cursor = cursor::Cursor::new(Instant::now());
@@ -787,8 +775,7 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
                     waited: status.dropped_total,
                 });
                 meter.second(Instant::now(), sample, &webview, &profiles);
-                status.mirror =
-                    mirror_status(mirror.as_ref(), &mirror_settings, mirror_sources.as_ref(), mirror_error.as_deref());
+                status.mirror = mirror_status(mirror.as_ref(), &mirror_settings, mirror_error.as_deref());
                 (config.on_status)(&status);
                 last_frames = frames;
             }
@@ -825,21 +812,21 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
                 slot.store(value, Ordering::Release);
             }
             let _ = webview.post_json(&settings_message(&config.settings.get()));
-            // The mirror listens as the settings now say: another port, on the network or not, or not at all.
+            // The frames' quality and rate follow at once; a new port, the network or switching it off needs the
+            // listener anew (the old one may hold the port the new one wants).
             let wanted_mirror = config.settings.get().mirror.clamped();
-            if wanted_mirror != mirror_settings {
-                mirror_settings = wanted_mirror;
+            mirror::configure(&wanted_mirror);
+            let restart = (wanted_mirror.enabled, wanted_mirror.port, wanted_mirror.lan)
+                != (mirror_settings.enabled, mirror_settings.port, mirror_settings.lan);
+            mirror_settings = wanted_mirror;
+            if restart {
                 if mirror.take().is_some() {
-                    log!("the cabin page mirror stops: its settings changed");
+                    log!("the cabin page mirror stops: its port or network changed");
                 }
-                mirror_error = None;
-                if let Some(sources) = &mirror_sources {
-                    let started = start_mirror(&mirror_settings, sources);
-                    mirror = started.0;
-                    mirror_error = started.1;
-                }
-                status.mirror =
-                    mirror_status(mirror.as_ref(), &mirror_settings, mirror_sources.as_ref(), mirror_error.as_deref());
+                let started = start_mirror(&mirror_settings);
+                mirror = started.0;
+                mirror_error = started.1;
+                status.mirror = mirror_status(mirror.as_ref(), &mirror_settings, mirror_error.as_deref());
                 (config.on_status)(&status);
             }
         }
@@ -861,6 +848,11 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
         );
         let mouse = pointer.update(&plugin.pointer, &webview, web, covered);
         cursor.follow(mouse, Instant::now());
+        // The mouse of the player's phone or tablet (the mirrored screen), as if it were over the page: the frame's
+        // point made the page's own (its place on the frame changes with the screen the game draws it on).
+        for input in mirror::take_inputs() {
+            send_mirror_input(&webview, &page_place, &mut mirror_keys, input);
+        }
         // The player's keybinds pressed (and the volume keys held) in the game: the page acts on each.
         for keybind in Keybind::ALL {
             let plugin = &bridge.bridge().plugin;
@@ -2274,22 +2266,22 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
     Ok(())
 }
 
-/// Starts the cabin page's mirror as `settings` say (`None`: it's off): the mirror, and why it couldn't start
+/// Starts the cabin page's frame mirror as `settings` say (`None`: it's off): the mirror, and why it couldn't start
 /// (`None`: it runs, or it's off).
-fn start_mirror(settings: &MirrorSettings, sources: &Sources) -> (Option<Mirror>, Option<String>) {
+fn start_mirror(settings: &MirrorSettings) -> (Option<Mirror>, Option<String>) {
     if !settings.enabled {
         return (None, None);
     }
-    match mirror::start(settings, sources) {
+    match mirror::start(settings) {
         Ok(mirror) => {
             match (&mirror.lan_url, mirror.lan) {
                 (Some(lan_url), _) => {
-                    log!("the cabin page mirrors at {} (on the network: {lan_url})", mirror.local_url)
+                    log!("the truck's screen mirrors at {} (on the network: {lan_url})", mirror.local_url)
                 }
                 (None, true) => {
-                    log!("the cabin page mirrors at {} (no address on the network was found)", mirror.local_url)
+                    log!("the truck's screen mirrors at {} (no address on the network was found)", mirror.local_url)
                 }
-                (None, false) => log!("the cabin page mirrors at {}", mirror.local_url),
+                (None, false) => log!("the truck's screen mirrors at {}", mirror.local_url),
             }
             (Some(mirror), None)
         }
@@ -2300,15 +2292,10 @@ fn start_mirror(settings: &MirrorSettings, sources: &Sources) -> (Option<Mirror>
     }
 }
 
-/// The mirror as the status reports it: where it serves and how many pages are on it, or the reason it doesn't
-/// (`None`: it's off, or the page shown isn't one that's mirrored).
-fn mirror_status(
-    mirror: Option<&Mirror>,
-    settings: &MirrorSettings,
-    sources: Option<&Sources>,
-    error: Option<&str>,
-) -> Option<MirrorStatus> {
-    if sources.is_none() || !settings.enabled {
+/// The mirror as the status reports it (`None`: it's off): where it serves and how many viewers it has, or the reason
+/// it doesn't.
+fn mirror_status(mirror: Option<&Mirror>, settings: &MirrorSettings, error: Option<&str>) -> Option<MirrorStatus> {
+    if !settings.enabled {
         return None;
     }
     Some(match mirror {
@@ -2327,6 +2314,77 @@ fn mirror_status(
             error: error.map(str::to_owned),
         },
     })
+}
+
+/// Sends one mouse event of the mirrored page into the cabin page: its point made the page's own (the page's place
+/// on the frame, [`westplay_shared::PagePlace`]), `keys` the mouse's buttons as WebView2 has them.
+fn send_mirror_input(
+    webview: &OffscreenWebView,
+    place: &westplay_shared::PagePlace,
+    keys: &mut i32,
+    input: InputEvent,
+) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_MOUSE_EVENT_KIND, COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_DOWN,
+        COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_UP, COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_DOWN,
+        COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_UP, COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE,
+        COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_DOWN, COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_UP,
+        COREWEBVIEW2_MOUSE_EVENT_KIND_WHEEL, COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS,
+        COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_LEFT_BUTTON, COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_MIDDLE_BUTTON,
+        COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_RIGHT_BUTTON,
+    };
+    let point = match input {
+        InputEvent::Move { x, y } | InputEvent::Down { x, y, .. } | InputEvent::Up { x, y, .. }
+        | InputEvent::Wheel { x, y, .. } => mirror_page_point(place, x, y),
+    };
+    // The buttons held, as WebView2 is told before each event: a press's MOVE has it released, its press held.
+    let send = |kind: COREWEBVIEW2_MOUSE_EVENT_KIND, data: u32, held: i32| {
+        let _ = webview.send_mouse(kind, COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS(held), data, point);
+    };
+    let button_key = |button: Button| match button {
+        Button::Left => COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_LEFT_BUTTON.0,
+        Button::Right => COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_RIGHT_BUTTON.0,
+        Button::Middle => COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_MIDDLE_BUTTON.0,
+    };
+    match input {
+        InputEvent::Move { .. } => send(COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE, 0, *keys),
+        // Where the mouse is, before the press or release itself (as a browser sends them).
+        InputEvent::Down { button, .. } => {
+            send(COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE, 0, *keys);
+            *keys |= button_key(button);
+            let kind = match button {
+                Button::Left => COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_DOWN,
+                Button::Right => COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_DOWN,
+                Button::Middle => COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_DOWN,
+            };
+            send(kind, 0, *keys);
+        }
+        InputEvent::Up { button, .. } => {
+            send(COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE, 0, *keys);
+            *keys &= !button_key(button);
+            let kind = match button {
+                Button::Left => COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_UP,
+                Button::Right => COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_UP,
+                Button::Middle => COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_UP,
+            };
+            send(kind, 0, *keys);
+        }
+        // Its notches (120 each, as Win32 counts them), at the point it's over: the viewer's delta is negative up
+        // the page, WebView2's positive away from the player (the same up), so the sign is turned.
+        InputEvent::Wheel { delta, .. } => {
+            send(COREWEBVIEW2_MOUSE_EVENT_KIND_WHEEL, delta.saturating_neg() as u32, *keys)
+        }
+    }
+}
+
+/// The page's pixel for a frame's point: the frame's part the page covers (`place`), the page's height at the rows
+/// it's squeezed into, rounded to the nearest; a point past an edge takes the edge's pixel.
+fn mirror_page_point(place: &westplay_shared::PagePlace, x: i32, y: i32) -> POINT {
+    let (width, height, rows) = (place.width.max(1), place.height.max(1), place.rows.max(1));
+    let x = (x - place.left as i32).clamp(0, width as i32 - 1);
+    let y = (i64::from(y) - i64::from(place.top)) * i64::from(height) + i64::from(rows) / 2;
+    let y = (y / i64::from(rows)).clamp(0, i64::from(height - 1)) as i32;
+    POINT { x, y }
 }
 
 /// Whether the game's plugin is alive, judged by its heartbeat (its frame count) having moved within

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { isInHost, isMirrored, postToHost } from '../shared/host'
+import { isInHost, postToHost } from '../shared/host'
 import { appleMusicPlayer, pauseAppleMusicWithGame } from './apps/music/pauseWithGame'
 import { BRIGHTNESS_STEP, keybinds, stepped } from './apps/keybinds'
 import { oneAtATime } from './apps/oneAtATime'
@@ -53,13 +53,6 @@ export function CabinApp() {
   const route = useCabin((state) => state.navigation.route)
   const phase = useCabin((state) => state.power.phase)
   useEffect(() => connectHost(), [])
-  // The page the host mirrors to a plain browser is a browser tab: the system cursor shows there, not a WebView2's
-  // (shell.css `html.mirror`).
-  useEffect(() => {
-    if (!isMirrored()) return
-    document.documentElement.classList.add('mirror')
-    return () => document.documentElement.classList.remove('mirror')
-  }, [])
   // YouTube, Spotify, Apple Music, QQ Music, NetEase Cloud Music, the radio, YouTube Music, Player and
   // Safari pause with the game (its menu, tabbing out) and play on after.
   useEffect(() => pauseYouTubeWithGame(), [])
@@ -104,8 +97,8 @@ export function CabinApp() {
       overlay={
         <>
           {FOLLOW_POWER && phase !== 'on' && <BootScreen phase={phase} />}
-          {/* In a plain browser the system cursor is there already; a mirrored page is a plain browser tab. */}
-          {isInHost() && !isMirrored() && <Cursor />}
+          {/* In a plain browser the system cursor is there already. */}
+          {isInHost() && <Cursor />}
         </>
       }
     >

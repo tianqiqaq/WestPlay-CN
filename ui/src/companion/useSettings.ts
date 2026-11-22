@@ -51,19 +51,30 @@ export interface Settings {
   language: string | null
 }
 
-/** Mirrors `westplay_host::settings::Mirror`: the screen also served in a browser, on `port`. */
+/** Mirrors `westplay_host::settings::Mirror`: the screen also served in a browser, on `port`, at `quality` and
+ * `fps`. */
 export interface MirrorSettings {
   enabled: boolean
   port: number
   /** Any device on the same network, or this PC only. */
   lan: boolean
+  /** The picture's JPEG quality (the frame the browser shows), `MIRROR_QUALITY.min`..`MIRROR_QUALITY.max`. */
+  quality: number
+  /** How many frames a second the browser shows, `MIRROR_FPS.min`..`MIRROR_FPS.max`. */
+  fps: number
 }
 
 /** What the mirror is when the app has never saved it (mirrors the host's own defaults). */
-export const MIRROR_DEFAULT: MirrorSettings = { enabled: true, port: 35421, lan: true }
+export const MIRROR_DEFAULT: MirrorSettings = { enabled: true, port: 35421, lan: true, quality: 85, fps: 30 }
 
 /** The ports the mirror's page takes: above the well-known ones, up to the top. */
 export const MIRROR_PORT = { min: 1024, max: 65535 }
+
+/** The picture quality the mirror's frames take (JPEG, higher is sharper and larger). */
+export const MIRROR_QUALITY = { min: 40, max: 95, step: 5 }
+
+/** How many frames a second the mirror sends (higher is smoother and larger). */
+export const MIRROR_FPS = { min: 5, max: 30, step: 5 }
 
 /** Mirrors `westplay_host::settings::CoachSpeakers`: a coach plays through its driver's pair, or through every
  * unit over the passengers' seats. */

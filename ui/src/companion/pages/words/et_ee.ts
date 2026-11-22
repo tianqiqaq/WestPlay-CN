@@ -341,7 +341,7 @@ export const words: CompanionWords = {
   },
   mirror: {
     title: 'Browser Access',
-    sub: 'Watch and use the truck’s screen in a browser, on this PC or another device on your network.',
+    sub: 'The truck’s screen itself, the same frame in sync, in a browser on this PC or another device on your network: click, drag and scroll there to use it.',
     status: {
       running: 'Running',
       off: 'Not running. Turn it on below, and the screen opens in a browser.',
@@ -361,13 +361,17 @@ export const words: CompanionWords = {
     portInvalid: 'Use a port from {min} to {max}.',
     lanOn: 'Allow other devices',
     lanDetail: 'On, any device on the same network can open and use the screen. Only on networks you trust.',
+    quality: 'Image quality',
+    qualityDetail: 'JPEG quality from {min} to {max}: the higher, the sharper and the larger.',
+    fps: 'Frame rate',
+    fpsDetail: 'Frames a second from {min} to {max}: the higher, the smoother and the larger.',
     save: 'Save',
     saved: 'Applied',
     saveFailed: 'Couldn’t save. {error}',
     notes: {
-      sameScreen: 'The browser shows a live mirror of the same screen: what you click there reaches the cab.',
+      sameScreen: 'The browser shows the very screen the game draws for the truck: the same frame, fully in sync. Click, drag and scroll there as in the cab.',
       sound: 'Sound stays in the game and the truck. The browser is silent.',
-      video: 'YouTube’s video is black in the browser: the host composes that picture for the truck.',
+      video: 'Video players like YouTube are mirrored too: their picture comes with the screen.',
     },
   },
 }

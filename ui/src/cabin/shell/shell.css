@@ -595,9 +595,3 @@ body,
     width: calc(50px * var(--sidebar-button-scale, 1));
   }
 }
-
-/* A page the host mirrors to a plain browser (CabinApp.tsx, shared/host.ts `isMirrored`): a browser tab, so the
-   system cursor stays (the page draws none there, and the host doesn't draw one into its frames). */
-html.mirror {
-  cursor: auto;
-}

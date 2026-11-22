@@ -13,7 +13,7 @@
 //! copied. The mailbox's lock is never held across GPU work: WGC may call in while holding the device's
 //! lock, and a lock held across a copy (which takes the device's lock) would deadlock against it.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -82,6 +82,11 @@ pub struct Capture {
     light: Cell<f32>,
     drawn_light: Cell<f32>,
     dim_failed: Cell<bool>,
+    /// The shared frame copied into a readable texture, and out as BGRA rows, for the mirror (`mirror.rs`): only
+    /// while a viewer watches and the settings' rate allows it.
+    readback: ID3D11Texture2D,
+    bgra: RefCell<Vec<u8>>,
+    readback_failed: Cell<bool>,
 }
 
 impl Capture {
@@ -126,6 +131,7 @@ impl Capture {
                 None
             }
         };
+        let readback = gpu.staging_texture(shared.width, shared.height)?;
         Ok(Self {
             pool,
             session,
@@ -148,6 +154,9 @@ impl Capture {
             light: Cell::new(1.0),
             drawn_light: Cell::new(1.0),
             dim_failed: Cell::new(false),
+            readback,
+            bgra: RefCell::new(Vec::new()),
+            readback_failed: Cell::new(false),
         })
     }
 
@@ -226,6 +235,15 @@ impl Capture {
                 Lock::Abandoned => self.abandoned.store(true, Ordering::Relaxed),
             }
         }
+        // A mirrored picture (mirror.rs) asked for while the page stands still: its last frame again, so a viewer
+        // that just connected gets one and a still screen keeps reaching the player's phone. The game's frame isn't
+        // sent again (the plugin has this picture already): only the mirror's copy is read.
+        if sent != Some(true) && self.has_clean.get() && crate::mirror::watching() && crate::mirror::wants_frame() {
+            match self.compose(cursor, placement) {
+                Lock::Held | Lock::Busy => {}
+                Lock::Abandoned => self.abandoned.store(true, Ordering::Relaxed),
+            }
+        }
     }
 
     /// A frame went out, with `cursor` on it.
@@ -288,8 +306,45 @@ impl Capture {
         {
             crate::log!("cursor: couldn't be drawn: {e}");
         }
+        // The frame as the game gets it, for the player's phone or tablet too (mirror.rs), read in this same locked
+        // turn: only while a viewer watches, and no more often than the settings' frames a second.
+        let read = crate::mirror::watching() && crate::mirror::wants_frame() && self.read_back();
         self.shared.unlock();
+        if read {
+            let bgra = self.bgra.borrow();
+            crate::mirror::publish_frame(self.shared.width, self.shared.height, &bgra);
+        }
         Lock::Held
+    }
+
+    /// Copies the shared frame (the lock held) into the readable texture and out as BGRA rows (`false`: this turn's
+    /// frame couldn't be read, and the next is waited for).
+    fn read_back(&self) -> bool {
+        let (width, height) = (self.shared.width as usize, self.shared.height as usize);
+        // SAFETY: both textures are alive and the same size and format, the shared one locked (compose's caller), and
+        // the readable one is only ours; its rows are read within the pitch the GPU mapped.
+        unsafe {
+            self.context.CopyResource(&self.readback, &self.shared.texture);
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            if let Err(e) = self.context.Map(&self.readback, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) {
+                if !self.readback_failed.replace(true) {
+                    crate::log!("mirror: a frame couldn't be read back: {e}");
+                }
+                return false;
+            }
+            let mut bgra = self.bgra.borrow_mut();
+            bgra.resize(width * height * 4, 0);
+            for row in 0..height {
+                let line = std::slice::from_raw_parts(
+                    (mapped.pData as *const u8).add(row * mapped.RowPitch as usize),
+                    width * 4,
+                );
+                bgra[row * width * 4..(row + 1) * width * 4].copy_from_slice(line);
+            }
+            self.context.Unmap(&self.readback, 0);
+        }
+        self.readback_failed.set(false);
+        true
     }
 }
 

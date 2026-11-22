@@ -265,7 +265,8 @@ export interface CompanionWords {
 
 /**
  * Browser Access (the screen served in a browser): its state, the addresses, and the mirror's settings.
- * `{n}`: how many pages are connected; `{min}`, `{max}`: the port range; `{error}`: why saving failed.
+ * `{n}`: how many pages are connected; `{min}`, `{max}`: the port's and the sliders' ranges; `{error}`: why
+ * saving failed.
  */
 export interface MirrorWords {
   title: string
@@ -289,6 +290,10 @@ export interface MirrorWords {
   portInvalid: string
   lanOn: string
   lanDetail: string
+  quality: string
+  qualityDetail: string
+  fps: string
+  fpsDetail: string
   save: string
   saved: string
   saveFailed: string

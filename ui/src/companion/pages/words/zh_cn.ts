@@ -338,7 +338,7 @@ export const words: CompanionWords = {
   },
   mirror: {
     title: '浏览器访问',
-    sub: '在这台电脑或其他设备的浏览器里查看并操作卡车屏幕。',
+    sub: '浏览器里的就是游戏内车机屏幕本身：同一帧、完全同步，可以直接点按、拖动、滚轮操作。',
     status: {
       running: '运行中',
       off: '未运行。在下面开启后，屏幕就会在浏览器中打开。',
@@ -358,13 +358,17 @@ export const words: CompanionWords = {
     portInvalid: '请使用 {min} 到 {max} 之间的端口。',
     lanOn: '允许局域网设备',
     lanDetail: '开启后，同一网络中的任何设备都能打开并操作这块屏幕。只在你信任的网络中开启。',
+    quality: '画质',
+    qualityDetail: 'JPEG 画质，{min} 到 {max}：越高画面越清晰，占用的流量也越大。',
+    fps: '帧率',
+    fpsDetail: '每秒帧数，{min} 到 {max}：越高画面越流畅，占用的流量也越大。',
     save: '保存',
     saved: '已生效',
     saveFailed: '保存失败：{error}',
     notes: {
-      sameScreen: '浏览器里是同一块屏幕的实时镜像，在浏览器里的操作也会作用到车机。',
+      sameScreen: '浏览器显示的就是游戏内车机屏幕本身：同一帧、完全同步，在浏览器里可以直接点按、拖动、滚轮操作。',
       sound: '声音仍在游戏和车机中播放，浏览器不会出声。',
-      video: 'YouTube 的视频画面在浏览器里是黑色的（画面由 host 合成给车机）。',
+      video: 'YouTube 等播放器的视频画面也会随屏幕一起镜像过来。',
     },
   },
 }
