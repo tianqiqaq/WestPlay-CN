@@ -7,6 +7,7 @@
 pub mod log;
 mod apple_music;
 pub mod browser;
+mod brightness;
 mod camera;
 mod capture;
 mod cursor;
@@ -16,10 +17,12 @@ mod game_settings;
 mod gpu;
 pub mod graphics;
 mod handover;
+mod hidden_webview;
 mod lyrics;
-mod music_folder;
+mod map_process;
 pub mod maps;
 mod mirror;
+mod music_folder;
 mod performance;
 mod planner;
 mod play_log;
@@ -27,9 +30,13 @@ mod player;
 mod pointer;
 mod qq_music;
 mod netease_music;
+mod radio;
 mod netease_proxy;
 pub mod route;
 mod route_change;
+mod safari;
+#[cfg(test)]
+mod gpu_contention;
 pub mod settings;
 mod signin;
 pub mod speakers;
@@ -38,6 +45,7 @@ pub mod startup;
 mod typing;
 mod weather;
 mod webview;
+mod worker;
 mod youtube;
 mod youtube_music;
 
@@ -101,6 +109,10 @@ pub struct Status {
     /// Whether the truck the player is in is one WestPlay shows in, as the plugin last saw (`None`: not known yet,
     /// or no game).
     pub truck_supported: Option<bool>,
+    /// The coach the player drives: how many speakers its passengers' set plays through (its body's, from the
+    /// save's fitted parts). `None` in a truck, with no game, or before the coach's parts are read: the companion's
+    /// Coach speakers greyed out then (owner 2026-11-13).
+    pub coach_speakers: Option<u32>,
     /// Whether the game runs as administrator: WestPlay can't read its route, guidance or weather then
     /// ([`is_elevated`]), and the player is told to start it normally.
     pub game_elevated: bool,
@@ -247,6 +259,9 @@ pub struct Config {
     pub customize_changed: Arc<std::sync::atomic::AtomicU64>,
     /// The game WestPlay is set up in (the companion's setup sets it): its map is built for the cab.
     pub game: Arc<maps::SetUpGame>,
+    /// WestPlay's map builder (`westplay-maps.exe`), each map built in a process of its own; `None`: built in
+    /// WestPlay's (a development build that hasn't built it).
+    pub map_builder: Option<PathBuf>,
 }
 
 struct Pipeline {
@@ -276,7 +291,7 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
     if let Some(luid) = cab_gpu {
         log!("the cab is drawn on {}", graphics::name_of(luid, &adapters).unwrap_or_default());
     }
-    let webview = OffscreenWebView::new(&stage, config.width, config.height, &config.data_dir.join("webview2"))?;
+    let webview = cab_webview(&stage, config.width, config.height, &config.data_dir.join("webview2"))?;
     stage.add(&webview, true)?;
     startup::mark("host: cabin browser (WebView2) ready");
     match &config.content {
@@ -327,13 +342,22 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
         None => (None, None),
     };
     let music_watch = music_folder::FolderWatch::start(music_covers);
+    // Safari: its tabs' pictures for its tab overview (safari.rs).
+    let safari_pictures = config.data_dir.join("safari-tabs");
+    let _ = std::fs::create_dir_all(&safari_pictures);
+    webview.map_folder_to_any_page(safari::TABS_HOST, &safari_pictures)?;
     // The folder and its songs as last listed (sent again when the page reloads).
     let mut music_dir: Option<PathBuf> = None;
     let mut music_listing: Option<String> = None;
     let (customize_list, customize_listed) = std::sync::mpsc::channel::<String>();
     let mut customize_posted: Option<u64> = None;
     let mut customize_message: Option<String> = None;
-    let map_watch = maps::MapWatch::start(maps_dir.clone(), config.game.clone());
+    let map_watch = maps::MapWatch::start(
+        maps_dir.clone(),
+        config.game.clone(),
+        config.settings.clone(),
+        config.map_builder.clone(),
+    );
     let mut map_shown: (Option<String>, Option<u64>) = (None, None);
     let mut status = Status {
         webview_version: webview.version.clone(),
@@ -363,27 +387,38 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
     let mut was_outside = false;
     // The players' tone (the cab's Settings › Equalizer), passed on with the cab ([`settings::SoundSettings`]).
     let mut equalizer = config.settings.get().sound.playing();
-    // The cab's shared reflections (Settings › Sound › Cabin Reverb), passed on with the cab too.
-    let mut reverb = config.settings.get().sound.reverb.clamped();
-    let mut character = config.settings.get().sound.character;
-    // The cab's EQ switch (Settings › Sound's first row): off, the players are told CabinCharacter::Off.
-    let mut enabled = config.settings.get().sound.enabled;
-    let mut reflection = config.settings.get().sound.reflection.clamped();
-    let mut bass = config.settings.get().sound.bass.clamped();
+    // The low band's own limiter (the cab's Settings › Sound › Low Limiter), 200 Hz and under alone.
+    let mut limiter = config.settings.get().sound.limiter.clamped();
+    // The room's early and late levels, the room's own (the cab's sound settings no longer set them).
+    let reflections = (70u8, 50u8);
     // The music's spectrum wanted by the cab (its Equalizer open): asked of the players with the cab.
     let mut spectrum = false;
-    // The page's height (`westplay_shared::page_height`): the frame's until a screen asks for another.
-    let mut page_height = config.height;
+    // The screen's light (`brightness.rs`), as the page's Settings set it: full till it says.
+    let mut screen_light = 1.0;
+    // Where the page is on the frame (`westplay_shared::page_place`): the whole frame until a screen asks for another
+    // shape, or a bus's Gps part for its glass.
+    let mut page_place = westplay_shared::PagePlace {
+        left: 0,
+        top: 0,
+        width: config.width,
+        rows: config.height,
+        height: config.height,
+    };
     let mut pointer = Pointer::new(config.width, config.height);
     // The screen's cursor, drawn into the frames the game takes (cursor.rs), and whether the page was last told the
     // host draws it (`None`: not told since it loaded).
     let mut cursor = cursor::Cursor::new(Instant::now());
     let mut cursor_told: Option<bool> = None;
+    // Whether what's under the cursor is light, as last read from the frame (`capture::Capture::light_under`).
+    let mut cursor_light: Option<bool> = None;
     // What the player's latest save says (their garages, a map WestPlay doesn't allow), kept to send again
     // when the page reloads.
     let player_watch = PlayerWatch::start(bridge.clone());
     // The speakers of the parts of the truck the player is in, for the trucks whose speakers come with them.
     let mut part_speakers: Option<PartSpeakers> = None;
+    // The coach the player is in: its driver's and its passengers' speakers, by its body as the game tells it the
+    // moment the player gets in (`speakers::coach`: its model and axles; never the save).
+    let mut coach_sets: Option<(Vec<speakers::Speaker>, Vec<speakers::Speaker>)> = None;
     let mut player_messages: Vec<String> = Vec::new();
     // The game's GPS route, and the truck's progress along it, kept to send again when the page reloads.
     let route_watch = RouteWatch::start(bridge.clone(), map_watch.played.clone());
@@ -471,6 +506,9 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
     let mut netease_music_state: Option<apple_music::State> = None;
     let (mut netease_music_window_open, mut netease_music_confirming) = (false, false);
     let mut netease_music_playback: Option<String> = None;
+    // radio.cn's page, the Radio app's engine.
+    let mut radio: Option<radio::Radio> = None;
+    let mut radio_playback: Option<String> = None;
     // YouTube Music's web player, the same way (on the cabin page's profile, sharing YouTube's sign-in).
     let mut youtube_music: Option<youtube_music::YouTubeMusic> = None;
     let mut youtube_music_state: Option<youtube_music::State> = None;
@@ -480,6 +518,11 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
     let mut music_player: Option<music_folder::Player> = None;
     let mut music_player_playback: Option<String> = None;
     let mut music_player_log = play_log::PlayLog::new("player");
+    // Safari's pages (safari.rs), while the page uses them, and what each tab last said (sent again when the page
+    // reloads) and whether any plays.
+    let mut safari: Option<safari::Safari> = None;
+    let mut safari_tabs: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
+    let mut safari_playing = false;
     // The settings generation last applied (`None`: apply them once at startup).
     let mut applied_settings = None;
     // Each keybind's presses and holds the page was told of (`PluginBlock::keybind_presses`, `keybind_holds`).
@@ -504,8 +547,20 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
         // A captured frame that came before its turn goes out now that it's due.
         // The cursor drawn over it where the mouse is now, the page squeezed into the frame as it's laid out.
         if let Some(pipeline) = &pipeline {
-            let squeeze = config.height as f32 / page_height.max(1) as f32;
-            pipeline.capture.flush(cursor.look(Instant::now()), squeeze);
+            let placement = cursor::Placement {
+                left: page_place.left as f32,
+                top: page_place.top as f32,
+                squeeze: page_place.rows as f32 / page_place.height.max(1) as f32,
+            };
+            pipeline.capture.flush(cursor.look(Instant::now()), placement);
+            // Dark over something light, light over something dark: as the frame shows what's under it, whatever
+            // draws it (owner 2026-11-09: "it shouldn't care what lies under it, app or not").
+            if let Some(light) = pipeline.capture.light_under()
+                && cursor_light != Some(light)
+            {
+                cursor_light = Some(light);
+                cursor.set_light(light, Instant::now());
+            }
         }
         // The page told whether the host draws the cursor (it draws its own where the host can't).
         let drawn = pipeline.as_ref().is_some_and(|pipeline| pipeline.capture.draws_cursor());
@@ -671,6 +726,7 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
                         host.frame_generation.store(generation, Ordering::Release);
                         status.adapter = Some(built.gpu.adapter_name.clone());
                         status.error = None;
+                        built.capture.set_light(screen_light);
                         pipeline = Some(built);
                     }
                     Err(e) => status.error = Some(format!("capture pipeline failed: {e}")),
@@ -711,6 +767,10 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
                     westplay_shared::TRUCK_UNSUPPORTED => Some(false),
                     _ => None,
                 };
+                status.coach_speakers = coach_sets
+                    .as_ref()
+                    .filter(|_| status.game_connected)
+                    .map(|(_, passengers)| passengers.len() as u32);
                 status.game_elevated = status.game_connected && game_elevated;
                 let mut profiles = vec![(performance::Profile::Cab, webview.environment())];
                 if let Some(spotify) = &spotify {
@@ -783,7 +843,23 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
                 (config.on_status)(&status);
             }
         }
-        let mouse = pointer.update(&bridge.bridge().plugin.pointer, &webview);
+        // Over Safari's tab shown, the mouse is its page's.
+        let web = safari.as_ref().and_then(|browser| {
+            browser.shown().map(|(shown, view)| pointer::WebArea {
+                view,
+                area: safari::Rect { x: shown.x, y: shown.y, width: shown.width as f32, height: shown.height as f32 },
+                covers: &shown.covers,
+                // CSS pixels of the page: its window's pixel ratio and its scale in it.
+                zoom: browser.page_zoom(shown.tab).unwrap_or(shown.zoom),
+            })
+        });
+        // Under the game's parking camera the screen takes no mouse.
+        let plugin = &bridge.bridge().plugin;
+        let covered = westplay_shared::parking_camera_shown(
+            plugin.parking_frame.load(Ordering::Acquire),
+            plugin.heartbeat.load(Ordering::Acquire),
+        );
+        let mouse = pointer.update(&plugin.pointer, &webview, web, covered);
         cursor.follow(mouse, Instant::now());
         // The player's keybinds pressed (and the volume keys held) in the game: the page acts on each.
         for keybind in Keybind::ALL {
@@ -929,6 +1005,11 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
                             let _ = webview.post_json(playback);
                         }
                     }
+                    if radio.is_some()
+                        && let Some(playback) = &radio_playback
+                    {
+                        let _ = webview.post_json(playback);
+                    }
                     if youtube_music.is_some() {
                         let signing_in = youtube_music_window_open || youtube_music_confirming;
                         let message = youtube_music::state_message(youtube_music_state.as_ref(), signing_in);
@@ -944,6 +1025,13 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
                         && let Some(playback) = &music_player_playback
                     {
                         let _ = webview.post_json(playback);
+                    }
+                    if safari.is_some() {
+                        for message in safari_tabs.values() {
+                            let _ = webview.post_json(message);
+                        }
+                        let message = safari::Report::Playing(safari_playing).message();
+                        let _ = webview.post_json(&message);
                     }
                     let _ = webview.post_json(&settings_message(&config.settings.get()));
                     if let Some(message) = &customize_message {
@@ -962,6 +1050,7 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
                     }
                 }
                 Some(PageMessage::Startup { stage }) => startup::mark(&format!("page: {stage}")),
+                Some(PageMessage::Guidance { line }) => log!("route: the cab's guidance, {line}"),
                 Some(PageMessage::TruckStrip { strip }) => {
                     let mut settings = config.settings.get();
                     if settings.screen.truck_strip != strip {
@@ -971,35 +1060,44 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
                     }
                 }
                 Some(PageMessage::Spectrum { on }) => spectrum = on,
-                Some(PageMessage::CursorLight { light }) => cursor.set_light(light, Instant::now()),
+                Some(PageMessage::Brightness { level }) => {
+                    screen_light = brightness::light(level);
+                    if let Some(pipeline) = &pipeline {
+                        pipeline.capture.set_light(screen_light);
+                    }
+                }
+                // The page's own guess, only where the frame isn't read (the page drawing its own cursor).
+                Some(PageMessage::CursorLight { light }) => {
+                    if !pipeline.as_ref().is_some_and(|pipeline| pipeline.capture.light_under().is_some()) {
+                        cursor.set_light(light, Instant::now());
+                    }
+                }
                 Some(PageMessage::CursorArea { area }) => cursor.set_area(Some(area)),
                 Some(PageMessage::Equalizer { equalizer: curve, custom }) => {
-                    let mut sound = config.settings.get().sound;
-                    sound.equalizer = curve.clamped();
-                    sound.custom = custom;
-                    equalizer = sound.playing();
                     let mut settings = config.settings.get();
+                    // The cab's tone only: the companion's coach choice kept.
+                    let sound = settings::SoundSettings {
+                        equalizer: curve.clamped(),
+                        custom,
+                        ..settings.sound.clone()
+                    };
+                    equalizer = sound.playing();
                     if settings.sound != sound {
                         settings.sound = sound;
                         config.settings.set(settings.clone());
                         (config.on_settings)(&settings);
                     }
                 }
-                Some(PageMessage::Reverb { enabled, size, amount }) => {
+                Some(PageMessage::Limiter { limiter: told }) => {
                     let mut settings = config.settings.get();
-                    let sound = speakers::Reverb { enabled, size, amount }.clamped();
-                    if settings.sound.reverb != sound {
-                        reverb = sound;
-                        settings.sound.reverb = sound;
-                        config.settings.set(settings.clone());
-                        (config.on_settings)(&settings);
-                    }
-                }
-                Some(PageMessage::Character { character: chosen }) => {
-                    let mut settings = config.settings.get();
-                    if settings.sound.character != chosen {
-                        character = chosen;
-                        settings.sound.character = chosen;
+                    // The low band's own limiter only: the rest of the sound's settings kept.
+                    let sound = settings::SoundSettings {
+                        limiter: told.clamped(),
+                        ..settings.sound.clone()
+                    };
+                    limiter = sound.limiter;
+                    if settings.sound != sound {
+                        settings.sound = sound;
                         config.settings.set(settings.clone());
                         (config.on_settings)(&settings);
                     }
@@ -1007,7 +1105,6 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
                 Some(PageMessage::SoundEnabled { enabled: on }) => {
                     let mut settings = config.settings.get();
                     if settings.sound.enabled != on {
-                        enabled = on;
                         settings.sound.enabled = on;
                         config.settings.set(settings.clone());
                         (config.on_settings)(&settings);
@@ -1017,26 +1114,6 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
                     let mut settings = config.settings.get();
                     if id.as_ref().is_none_or(|id| id.len() <= 300) && settings.sound.preset != id {
                         settings.sound.preset = id;
-                        config.settings.set(settings.clone());
-                        (config.on_settings)(&settings);
-                    }
-                }
-                Some(PageMessage::Reflection { amount }) => {
-                    let mut settings = config.settings.get();
-                    let reflection_setting = speakers::CabinReflection { amount }.clamped();
-                    if settings.sound.reflection != reflection_setting {
-                        reflection = reflection_setting;
-                        settings.sound.reflection = reflection_setting;
-                        config.settings.set(settings.clone());
-                        (config.on_settings)(&settings);
-                    }
-                }
-                Some(PageMessage::Bass { cutoff }) => {
-                    let mut settings = config.settings.get();
-                    let bass_setting = speakers::BassManagement { cutoff }.clamped();
-                    if settings.sound.bass != bass_setting {
-                        bass = bass_setting;
-                        settings.sound.bass = bass_setting;
                         config.settings.set(settings.clone());
                         (config.on_settings)(&settings);
                     }
@@ -1096,6 +1173,13 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
                         let _ = player.command(&command);
                     }
                 }
+                Some(PageMessage::Radio { command }) => {
+                    if radio.is_none() && matches!(command, radio::Command::Pause) {
+                        // Nothing to pause: radio.cn isn't running.
+                    } else if let Some(player) = start_radio(&mut radio, &stage, &config) {
+                        let _ = player.command(&command);
+                    }
+                }
                 Some(PageMessage::YoutubeMusic { command }) => {
                     if youtube_music.is_none() && matches!(command, youtube_music::Command::Pause) {
                         // Nothing to pause: YouTube Music isn't running.
@@ -1114,6 +1198,22 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
                         // Nothing to pause: Player's player isn't running.
                     } else if let Some(player) = start_music_player(&mut music_player, &stage, &config, music_dir.as_deref()) {
                         let _ = player.command(&command);
+                    }
+                }
+                Some(PageMessage::Safari { command }) => {
+                    // Nothing to hide, pause or fade with Safari not running.
+                    let idle = matches!(
+                        command,
+                        safari::Command::Hide { .. }
+                            | safari::Command::Pause
+                            | safari::Command::Level { .. }
+                            | safari::Command::Appearance { .. }
+                    );
+                    if !(safari.is_none() && idle)
+                        && let Some(browser) = start_safari(&mut safari, &config, &webview)
+                        && let Err(e) = browser.command(&stage, &command)
+                    {
+                        log!("[safari] couldn't do what the cab asked: {e}");
                     }
                 }
                 Some(PageMessage::Typing { selection }) => {
@@ -1749,6 +1849,77 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
             }
         }
 
+        // What radio.cn's page says, for the page; a failed WebView closes it.
+        if let Some(player) = &radio {
+            if player.failed() || players_closing {
+                if players_closing {
+                    log!("[radio] closed with the game");
+                } else {
+                    log!("[radio] its browser failed: closed, the page opens it again");
+                }
+                if let Some(failed) = radio.take() {
+                    failed.close(&stage);
+                }
+                radio_playback = None;
+                let _ = webview.post_json(&radio::playback_message(None));
+            } else {
+                for report in player.take_reports() {
+                    match report {
+                        radio::Report::Spectrum(bars) => {
+                            let _ = webview.post_json(&speakers::spectrum_message(&bars));
+                        }
+                        radio::Report::Stations { region, stations, failed } => {
+                            let message = radio::stations_message(&region, &stations, failed);
+                            let _ = webview.post_json(&message);
+                        }
+                        radio::Report::Playback(playback) => {
+                            let message = radio::playback_message(playback.as_deref());
+                            let _ = webview.post_json(&message);
+                            radio_playback = Some(message);
+                        }
+                        radio::Report::Log(line) => log!("[radio] {line}"),
+                    }
+                }
+            }
+        }
+
+        // What Safari's pages say, for the page; its browser failing closes it, as the game closing does (every tab
+        // let go: the page shows them again as it wants them).
+        if let Some(browser) = &mut safari {
+            for report in browser.take_reports(&stage) {
+                let message = report.message();
+                match &report {
+                    safari::Report::Tab { tab, .. } => {
+                        safari_tabs.insert(*tab, message.clone());
+                    }
+                    safari::Report::Closed { tab } | safari::Report::LetGo { tab } => {
+                        safari_tabs.remove(tab);
+                    }
+                    safari::Report::Playing(playing) => safari_playing = *playing,
+                    _ => {}
+                }
+                let _ = webview.post_json(&message);
+            }
+            if browser.failed() || players_closing {
+                if players_closing {
+                    log!("[safari] closed with the game");
+                } else {
+                    log!("[safari] its browser failed: closed, the page opens it again");
+                }
+                for tab in browser.live() {
+                    let _ = webview.post_json(&safari::Report::LetGo { tab }.message());
+                }
+                if let Some(gone) = safari.take() {
+                    gone.close(&stage);
+                }
+                safari_tabs.clear();
+                if safari_playing {
+                    safari_playing = false;
+                    let _ = webview.post_json(&safari::Report::Playing(false).message());
+                }
+            }
+        }
+
         // What YouTube Music's page says, and its sign-in window, for the page; its WebView failing closes it.
         if let Some(player) = &youtube_music {
             if player.failed() || players_closing {
@@ -1868,111 +2039,144 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
             let distance = camera::Camera::distance(telemetry, outside).unwrap_or(0.0) as f32;
             let turn = game_settings.camera().steering_turn(telemetry.steering);
             let head = speakers::Head::of(telemetry).turned(turn);
-            // The truck's speakers: its parts' for a truck whose speakers come with them (none until they're
-            // found), else its own.
-            let truck_speakers = match &part_speakers {
-                Some(found) if found.truck == *truck => found.speakers.as_deref(),
+            // The truck's speakers: a coach's driver's or its passengers' as the companion's setting chooses; its
+            // parts' for a truck whose speakers come with them (none until they're found), else its own.
+            let truck_speakers = match (&coach_sets, &part_speakers) {
+                (Some((driver, passengers)), _) => Some(match config.settings.get().sound.coach {
+                    settings::CoachSpeakers::Driver => driver.as_slice(),
+                    settings::CoachSpeakers::Passengers => passengers.as_slice(),
+                }),
+                (None, Some(found)) if found.truck == *truck && found.speakers.is_some() => {
+                    found.speakers.as_deref()
+                }
                 _ if speakers::by_parts(truck.id.as_str()) => None,
                 _ => speakers::in_truck(truck.id.as_str()),
             };
-            // The EQ switch off: the players shape nothing at all, whatever character is chosen
-            // (`CabinCharacter::Off`: the speakers as they're placed, and only them).
-            let character = if enabled { character } else { speakers::CabinCharacter::Off };
+            // The cab as a room for sound: its interior's box, read from the save's parts (a truck the save
+            // hasn't got yet, or a coach whose room is far longer than a cab's, keeps the page's default).
+            let cabin = match (&coach_sets, &part_speakers) {
+                (Some(_), _) => None,
+                (None, Some(found)) if found.truck == *truck => found.cabin,
+                _ => None,
+            }
+            // A truck the save hasn't got yet (a quick job's, or one bought since it was written): its speakers'
+            // spread still tells a sleeper from a car, and the page gets a box of that size.
+            .or_else(|| truck_speakers.map(speakers::Cabin::from_speakers));
             if let Some(player) = &youtube {
                 let _ = player.cab(
                     truck_speakers,
+                    cabin,
                     head,
                     outside,
                     distance,
                     equalizer,
-                    reverb,
-                    character,
-                    reflection,
-                    bass,
+                    limiter,
+                    reflections,
                     spectrum,
                 );
             }
             if let Some(player) = &apple_music {
                 let _ = player.cab(
                     truck_speakers,
+                    cabin,
                     head,
                     outside,
                     distance,
                     equalizer,
-                    reverb,
-                    character,
-                    reflection,
-                    bass,
+                    limiter,
+                    reflections,
                     spectrum,
                 );
             }
             if let Some(player) = &qq_music {
                 let _ = player.cab(
                     truck_speakers,
+                    cabin,
                     head,
                     outside,
                     distance,
                     equalizer,
-                    reverb,
-                    character,
-                    reflection,
-                    bass,
+                    limiter,
+                    reflections,
                     spectrum,
                 );
             }
             if let Some(player) = &netease_music {
                 let _ = player.cab(
                     truck_speakers,
+                    cabin,
                     head,
                     outside,
                     distance,
                     equalizer,
-                    reverb,
-                    character,
-                    reflection,
-                    bass,
+                    limiter,
+                    reflections,
+                    spectrum,
+                );
+            }
+            if let Some(player) = &radio {
+                let _ = player.cab(
+                    truck_speakers,
+                    cabin,
+                    head,
+                    outside,
+                    distance,
+                    equalizer,
+                    limiter,
+                    reflections,
                     spectrum,
                 );
             }
             if let Some(player) = &youtube_music {
                 let _ = player.cab(
                     truck_speakers,
+                    cabin,
                     head,
                     outside,
                     distance,
                     equalizer,
-                    reverb,
-                    character,
-                    reflection,
-                    bass,
+                    limiter,
+                    reflections,
                     spectrum,
                 );
             }
             if let Some(player) = &spotify {
                 let _ = player.cab(
                     truck_speakers,
+                    cabin,
                     head,
                     outside,
                     distance,
                     equalizer,
-                    reverb,
-                    character,
-                    reflection,
-                    bass,
+                    limiter,
+                    reflections,
                     spectrum,
                 );
             }
             if let Some(player) = &music_player {
                 let _ = player.cab(
                     truck_speakers,
+                    cabin,
                     head,
                     outside,
                     distance,
                     equalizer,
-                    reverb,
-                    character,
-                    reflection,
-                    bass,
+                    limiter,
+                    reflections,
+                    spectrum,
+                );
+            }
+            // Safari's sound as the players': the truck's speakers, and the cabin's shaping too.
+            if let Some(browser) = &mut safari {
+                browser.cab(
+                    truck_speakers,
+                    cabin,
+                    head,
+                    outside,
+                    distance,
+                    equalizer,
+                    limiter,
+                    reflections,
                     spectrum,
                 );
             }
@@ -2010,6 +2214,27 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
                     startup::mark("host: truck sent to the page");
                 }
                 last_truck = Some(truck);
+                // A bus's Gps part: its glass is the truck's (the layout the same).
+                if let Some(layout) = last_layout {
+                    place_page(layout, last_truck.as_ref(), &mut page_place, &stage, &webview, &mut pointer);
+                }
+                coach_sets = speakers::coach(truck.id.as_str(), truck.axles).map(|coach| {
+                    let sets = (coach.driver_speakers(truck.head), coach.passenger_speakers(truck.head));
+                    log!(
+                        "speakers: {} ({}), {} axles: coach {}, the driver's {}, the passengers' {}",
+                        truck.id.as_str(),
+                        truck.plate.as_str(),
+                        truck.axles,
+                        coach.interior,
+                        sets.0.len(),
+                        sets.1.len()
+                    );
+                    sets
+                });
+                if coach_sets.is_none() && speakers::is_coach(truck.id.as_str()) {
+                    let (id, plate) = (truck.id.as_str(), truck.plate.as_str());
+                    log!("speakers: {id} ({plate}): no coach body on {} axles", truck.axles);
+                }
                 player_watch.truck(truck);
                 let message = serde_json::json!({ "type": "truck", "data": truck });
                 let _ = webview.post_json(&message.to_string());
@@ -2026,16 +2251,7 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
                 last_layout = Some(layout);
                 // The page in the shape the game shows it in on this screen (none drawn yet: as it was), before
                 // the page hears of the screen and lays itself out for it.
-                if let Some(index) = (layout as usize).checked_sub(1) {
-                    let height = westplay_shared::page_height(index);
-                    if height != page_height {
-                        page_height = height;
-                        log!("the page laid out {}x{height}, shown in the {}-row frame", config.width, config.height);
-                        let _ = stage.set_page_height(height);
-                        let _ = webview.place(0.0, 0.0, config.width, height);
-                        pointer.set_size(config.width, height);
-                    }
-                }
+                place_page(layout, last_truck.as_ref(), &mut page_place, &stage, &webview, &mut pointer);
                 let _ = webview.post_json(&screen_message(layout));
             }
         }
@@ -2413,9 +2629,9 @@ fn stops_message(id: Option<u32>, route: Option<&[u64]>, waypoints: &[u64], hidd
 /// The most presses of a keybind the page is told of at once.
 const MOST_KEYBIND_PRESSES: u32 = 10;
 
-/// `{"type":"keybind","action":"volumeUp"|"volumeDown"|"playPause"|"nextTrack"|"previousTrack"}`: the player
-/// pressed a keybind in the game, or `held` a volume key (`KEYBIND_HOLD_MS`): Volume up's the next song, Volume
-/// down's the one before.
+/// `{"type":"keybind","action":"volumeUp"|"volumeDown"|"playPause"|"nextTrack"|"previousTrack"|"brightnessDown"|
+/// "brightnessUp"}`: the player pressed a keybind in the game, or `held` a volume key (`KEYBIND_HOLD_MS`): Volume
+/// up's the next song, Volume down's the one before.
 fn keybind_message(keybind: Keybind, held: bool) -> String {
     let action = match (keybind, held) {
         (Keybind::VolumeUp, false) => "volumeUp",
@@ -2423,6 +2639,10 @@ fn keybind_message(keybind: Keybind, held: bool) -> String {
         (Keybind::VolumeUp, true) => "nextTrack",
         (Keybind::VolumeDown, true) => "previousTrack",
         (Keybind::PlayPause, _) => "playPause",
+        (Keybind::PreviousTrack, _) => "previousTrack",
+        (Keybind::NextTrack, _) => "nextTrack",
+        (Keybind::BrightnessDown, _) => "brightnessDown",
+        (Keybind::BrightnessUp, _) => "brightnessUp",
     };
     serde_json::json!({ "type": "keybind", "action": action }).to_string()
 }
@@ -2523,6 +2743,22 @@ fn start_netease_music<'a>(
     netease_music.as_ref()
 }
 
+/// radio.cn's page, started as the Radio app first asks (on a WebView2 profile of its own), or `None` if it
+/// couldn't start.
+fn start_radio<'a>(radio: &'a mut Option<radio::Radio>, stage: &Stage, config: &Config) -> Option<&'a radio::Radio> {
+    if radio.is_none() {
+        let user_data = config.data_dir.join("webview2-radio");
+        match radio::Radio::start(stage, config.width, config.height, &user_data) {
+            Ok(started) => {
+                log!("[radio] opened");
+                *radio = Some(started)
+            }
+            Err(e) => startup::mark(&format!("host: radio.cn couldn't start: {e}")),
+        }
+    }
+    radio.as_ref()
+}
+
 /// Player's own player, started as the page first plays (on the cabin page's profile, as YouTube Music's), the
 /// songs of `music` served to it; or `None` if it couldn't start.
 fn start_music_player<'a>(
@@ -2543,6 +2779,29 @@ fn start_music_player<'a>(
         }
     }
     music_player.as_ref()
+}
+
+/// Safari's browser, started as the page first asks something of it (on a profile of its own: `webview2-safari`),
+/// or `None` if it couldn't start.
+fn start_safari<'a>(
+    safari: &'a mut Option<safari::Safari>,
+    config: &Config,
+    cab: &OffscreenWebView,
+) -> Option<&'a mut safari::Safari> {
+    if safari.is_none() {
+        let user_data = config.data_dir.join("webview2-safari");
+        let pictures = config.data_dir.join("safari-tabs");
+        // The cab's Google sign-in (YouTube's, YouTube Music's), Safari's too.
+        let sign_in = safari::sign_in_of(cab, &safari::GOOGLE_SIGN_IN);
+        match safari::Safari::start(config.width, config.height, &user_data, &pictures, sign_in) {
+            Ok(started) => {
+                log!("[safari] opened");
+                *safari = Some(started)
+            }
+            Err(e) => startup::mark(&format!("host: Safari couldn't start: {e}")),
+        }
+    }
+    safari.as_mut()
 }
 
 /// YouTube Music's web player, started as the page first shows it (on the cabin page's profile, as YouTube's:
@@ -2611,6 +2870,30 @@ fn game_adapter(bridge: &BridgeMapping) -> Option<LUID> {
     (luid.LowPart != 0 || luid.HighPart != 0).then_some(luid)
 }
 
+/// The page where the screen the game draws WestPlay on has it (`layout`, the bridge's `screen_layout`, 0 until one has
+/// been drawn: as it was), in `truck` (a bus's Gps part its glass: `westplay_shared::page_place`), if that's not where
+/// it is (`placed`): the stage's page, the cab's page laid out at its size, the pointer within it.
+fn place_page(
+    layout: u32,
+    truck: Option<&TruckInfo>,
+    placed: &mut westplay_shared::PagePlace,
+    stage: &Stage,
+    webview: &OffscreenWebView,
+    pointer: &mut Pointer,
+) {
+    let Some(index) = (layout as usize).checked_sub(1) else { return };
+    let place = westplay_shared::page_place(index, truck.map_or("", |truck| truck.id.as_str()));
+    if place == *placed {
+        return;
+    }
+    *placed = place;
+    let westplay_shared::PagePlace { left, top, width, rows, height } = place;
+    log!("the page laid out {width}x{height}, shown in the frame's {width}x{rows} from ({left}, {top})");
+    let _ = stage.set_page_place(place);
+    let _ = webview.place(0.0, 0.0, width, height);
+    pointer.set_size(width, height);
+}
+
 /// `{"type":"screen","layout":"scania-2025"}`: which kind of screen the game draws WestPlay on, from the
 /// bridge's `screen_layout` (`null` until a screen has been drawn).
 fn screen_message(layout: u32) -> String {
@@ -2631,10 +2914,7 @@ fn settings_message(settings: &settings::Settings) -> String {
         "preset": settings.sound.preset,
         "equalizer": settings.sound.equalizer.clamped(),
         "equalizerCustom": settings.sound.custom,
-        "reverb": settings.sound.reverb.clamped(),
-        "character": settings.sound.character,
-        "reflection": settings.sound.reflection.clamped(),
-        "bass": settings.sound.bass.clamped(),
+        "limiter": settings.sound.limiter.clamped(),
         "buildings": settings.map.buildings,
         "roads": settings.map.roads,
         "language": settings.language.as_ref().map(|code| code.as_str()),
@@ -2650,6 +2930,49 @@ fn customize_list_message(customizations: &customize::Customizations) -> String 
     message.to_string()
 }
 
+/// How many times the cab's WebView is started before WestPlay's engine gives up, and the pause between.
+const CAB_TRIES: u32 = 3;
+const CAB_RETRY_AFTER: Duration = Duration::from_secs(2);
+/// After "invalid state" (another process's browser of the cab's profile still running): how many times, and the
+/// pause between, so that browser has gone.
+const CAB_TRIES_AFTER_INVALID_STATE: u32 = 5;
+const CAB_INVALID_STATE_WAIT: Duration = Duration::from_secs(3);
+
+/// The cab's WebView, started again after a failure ([`CAB_TRIES`]), each failure logged: WebView2's browser can take
+/// too long to start once (a player's ended "This operation returned because the timeout period expired", 0x800705B4,
+/// 2026-11-11). "Invalid state" ([`webview::invalid_state`]) is a browser of the cab's profile still running with
+/// other options, which starting again can't change while it runs; at WestPlay's start it's another process's (the
+/// WestPlay the installer closed, its browser not gone yet: a player's engine stopped there 37 ms in, and with it the
+/// maps the installation was to prepare, 2026-11-16), so it's waited out ([`CAB_TRIES_AFTER_INVALID_STATE`]).
+fn cab_webview(stage: &Stage, width: u32, height: u32, user_data: &std::path::Path) -> Result<OffscreenWebView, Error> {
+    let mut tried = 1;
+    loop {
+        match OffscreenWebView::new(stage, width, height, user_data) {
+            Ok(view) => return Ok(view),
+            Err(error) if webview::invalid_state(&error) && tried < CAB_TRIES_AFTER_INVALID_STATE => {
+                log!(
+                    "the cab's browser (WebView2) didn't start (try {tried} of {CAB_TRIES_AFTER_INVALID_STATE}): \
+                     {error}; another browser of its profile is still running: waiting for it to go"
+                );
+                std::thread::sleep(CAB_INVALID_STATE_WAIT);
+                tried += 1;
+            }
+            Err(error) if tried < CAB_TRIES && !webview::invalid_state(&error) => {
+                log!(
+                    "the cab's browser (WebView2) didn't start (try {tried} of {CAB_TRIES}): {error}; starting it again"
+                );
+                std::thread::sleep(CAB_RETRY_AFTER);
+                tried += 1;
+            }
+            Err(error) => {
+                let tries = if webview::invalid_state(&error) { CAB_TRIES_AFTER_INVALID_STATE } else { CAB_TRIES };
+                log!("the cab's browser (WebView2) didn't start (try {tried} of {tries}): {error}");
+                return Err(error);
+            }
+        }
+    }
+}
+
 /// Messages from the cabin page (`PageMessage` in ui/src/shared/host.ts).
 #[derive(Debug, PartialEq, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -2658,6 +2981,9 @@ enum PageMessage {
     Ready,
     /// A startup stage the page reached (the boot screens shown), for the startup log (`startup`).
     Startup { stage: String },
+    /// The cab's guidance (the next turn it shows, at which node, and how far), every 30 s while there's a route, for
+    /// the log (ui/src/cabin/maps/guidanceLog.ts).
+    Guidance { line: String },
     /// Whether WestPlay is open on the truck's screen: posted as the page loads and whenever it changes.
     Westplay { open: bool },
     /// The wallpaper chosen in the cab's Settings (an id: `wallpapers.ts`), to keep with the settings.
@@ -2672,15 +2998,10 @@ enum PageMessage {
         #[serde(default)]
         custom: bool,
     },
-    /// The cab's shared reverb, set in Settings › Sound › Cabin Reverb.
-    Reverb {
-        enabled: bool,
-        size: i8,
-        amount: i8,
-    },
-    /// The amount of cabin modelling every player uses.
-    Character {
-        character: speakers::CabinCharacter,
+    /// The low band's own limiter (Settings › Sound › Low Limiter), 200 Hz and under alone.
+    Limiter {
+        #[serde(flatten)]
+        limiter: speakers::Limiter,
     },
     /// The cab's EQ switch, off or on (Settings › Sound's first row).
     SoundEnabled {
@@ -2690,15 +3011,12 @@ enum PageMessage {
     Preset {
         id: Option<String>,
     },
-    Reflection {
-        amount: i8,
-    },
-    Bass {
-        cutoff: u8,
-    },
     /// The music's spectrum wanted (the cab's Equalizer open) or not: the players measure it, and it's passed
     /// on to the page as they say it.
     Spectrum { on: bool },
+    /// The screen's brightness, set in the cab's Settings (Appearance): the slider's place, 0 to 1
+    /// (`brightness::light`). Posted as the page loads and whenever it changes.
+    Brightness { level: f32 },
     /// Whether what's under the cursor is light (it's drawn dark there: `cursor`).
     CursorLight { light: bool },
     /// Where the cursor may be seen (`cursor::Area`): the CarPlay area, under its black corners.
@@ -2713,10 +3031,14 @@ enum PageMessage {
     QqMusic { command: qq_music::Command },
     /// A command for NetEase Cloud Music's web player (`neteaseMusic`): its sign-in, a question, its controls.
     NeteaseMusic { command: netease_music::Command },
+    /// A command for radio.cn's page (`radio`): its stations and player.
+    Radio { command: radio::Command },
     /// A command for YouTube Music's web player (`youtubeMusic`): its sign-in, a question, its controls.
     YoutubeMusic { command: youtube_music::Command },
     /// A command for Player's own player (`player`): what to play from the music folder, its controls.
     Player { command: music_folder::Command },
+    /// What the Safari app asks of its pages (`safari`): a tab shown, loaded, typed into, and so on.
+    Safari { command: safari::Command },
     /// The text field selected on the page, a number that changes with every selection (0: none), for the
     /// player's own keyboard to type into (`typing`).
     Typing { selection: u32 },
@@ -3001,6 +3323,10 @@ mod tests {
         );
         assert_eq!(parse_page_message(r#"{"type":"westplay"}"#), None);
         assert_eq!(
+            parse_page_message(r#"{"type":"brightness","level":0.4}"#),
+            Some(PageMessage::Brightness { level: 0.4 })
+        );
+        assert_eq!(
             parse_page_message(r#"{"type":"wallpaper","id":"custom:Dusk"}"#),
             Some(PageMessage::Wallpaper { id: "custom:Dusk".into() })
         );
@@ -3025,6 +3351,12 @@ mod tests {
             })
         );
         assert_eq!(parse_page_message(r#"{"type":"equalizer","bass":400}"#), None);
+        assert_eq!(
+            parse_page_message(r#"{"type":"limiter","threshold":-9,"ceiling":-1.5}"#),
+            Some(PageMessage::Limiter {
+                limiter: crate::speakers::Limiter { threshold: -9.0, ceiling: -1.5, ..Default::default() }
+            })
+        );
         assert_eq!(parse_page_message(r#"{"type":"spectrum","on":true}"#), Some(PageMessage::Spectrum { on: true }));
         assert_eq!(
             parse_page_message(r#"{"type":"cursorLight","light":true}"#),
@@ -3185,14 +3517,18 @@ mod tests {
                     "bass": 0,
                     "mid": 0,
                     "treble": 0,
-                    "advanced": false,
-                    "bands": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    "advanced": true,
+                    "bands": [5, 2, 0, 0, -1, 0, 0, 0, 0, 0, 0, 1, 3, 5, 7],
                 },
                 "equalizerCustom": false,
-                "reverb": { "enabled": true, "size": 55, "amount": 32 },
-                "character": "full",
-                "reflection": { "amount": 100 },
-                "bass": { "cutoff": 60 },
+                "limiter": {
+                    "threshold": 0.0,
+                    "ceiling": -3.5,
+                    "knee": 2.0,
+                    "attack": 11.5,
+                    "release": 250.0,
+                    "lookahead": 2.5,
+                },
                 "buildings": true,
                 "roads": true,
                 "language": null,
@@ -3215,8 +3551,8 @@ mod tests {
                 "bass": -6,
                 "mid": 2,
                 "treble": 6,
-                "advanced": false,
-                "bands": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                "advanced": true,
+                "bands": [5, 2, 0, 0, -1, 0, 0, 0, 0, 0, 0, 1, 3, 5, 7],
             })
         );
         // The curve is kept whichever is chosen; what plays is it, with Custom only.

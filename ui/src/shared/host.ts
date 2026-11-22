@@ -86,8 +86,16 @@ export interface JobInfo {
   income: number
 }
 
-/** What a keybind does: the music's volume a step up or down, play/pause, or the previous or next track. */
-export type KeybindAction = 'volumeUp' | 'volumeDown' | 'playPause' | 'previousTrack' | 'nextTrack'
+/** What a keybind does: the music's volume a step up or down, play/pause, the previous or next track, or the
+ * screen's brightness down or up; a volume key held also changes the song. */
+export type KeybindAction =
+  | 'volumeUp'
+  | 'volumeDown'
+  | 'playPause'
+  | 'previousTrack'
+  | 'nextTrack'
+  | 'brightnessDown'
+  | 'brightnessUp'
 
 export type HostMessage =
   | { type: 'telemetry'; data: Telemetry }
@@ -113,14 +121,8 @@ export type HostMessage =
       /** The player's own tone curve (Settings › Equalizer), and whether it plays (Custom) or not (Recommended). */
       equalizer?: Equalizer
       equalizerCustom?: boolean
-      /** The cab's shared reverb (Settings › Sound › Cabin Reverb). */
-      reverb?: Reverb
-      /** How much cabin modelling every player uses (Settings › Sound › Cabin Character). */
-      character?: CabinCharacter
-      /** The strength of the fixed-direction cabin reflections. */
-      reflection?: CabinReflection
-      /** The always-on bass management's mono crossover. */
-      bass?: BassManagement
+      /** The low band's own limiter (Settings › Sound › Low Limiter), 200 Hz and under alone. */
+      limiter?: Limiter
       /** Whether the map's buildings rise from it. */
       buildings?: boolean
       /** Whether its roads rise to their real heights. */
@@ -273,6 +275,10 @@ export type HostMessage =
   | ({ type: 'neteaseMusicAnswer'; id: number; failed?: boolean } & Partial<AppleMusicAnswers>)
   /** What NetEase Cloud Music plays; `null`: nothing. */
   | { type: 'neteaseMusicPlayback'; playback: AppleMusicPlayback | null }
+  /** radio.cn's stations of a province (`region`: its code; `failed`: radio.cn didn't say). */
+  | { type: 'radioStations'; region: string; stations: RadioStationInfo[]; failed?: boolean }
+  /** What the radio plays; `null`: nothing. */
+  | { type: 'radioPlayback'; playback: RadioPlayback | null }
   /** YouTube Music's web player: whether it's signed in and playing (`null`: not running), whether its sign-in
    * window is open on the PC, and the account's picture (Google's). YouTube's sign-in: they share it. */
   | {
@@ -286,6 +292,22 @@ export type HostMessage =
   | ({ type: 'youtubeMusicAnswer'; id: number; failed?: boolean } & Partial<YouTubeMusicAnswers>)
   /** What YouTube Music plays; `null`: nothing. */
   | { type: 'youtubeMusicPlayback'; playback: YouTubeMusicPlayback | null }
+  /** A Safari tab's page as it is now (`westplay_host::safari::TabState`). */
+  | { type: 'safariTab'; tab: number; state: SafariTabState }
+  /** A page opened a new window: a new tab `tab`, after the page's own (`opener`), its page already live. */
+  | { type: 'safariOpened'; tab: number; opener: number }
+  /** A page closed its own window (`window.close()`). */
+  | { type: 'safariClosed'; tab: number }
+  /** A tab's page let go (not live): loaded again from its address when shown. */
+  | { type: 'safariLetGo'; tab: number }
+  /** A page's dialog, waiting for the player's answer (an `answer` command). */
+  | { type: 'safariDialog'; tab: number; dialog: SafariDialog }
+  /** A tab's picture written, at `https://westplay.safari-tabs/tab-<tab>.png` (`version` new with each). */
+  | { type: 'safariPicture'; tab: number; version: number }
+  /** A page tried to download a file (a cab downloads nothing). */
+  | { type: 'safariNoDownload'; tab: number }
+  /** Whether any of Safari's pages plays sound. */
+  | { type: 'safariPlaying'; playing: boolean }
   /** The game's music folder (Player): where it is (`null`: the game's folder isn't known) and its songs. */
   | { type: 'musicFolder'; folder: string | null; songs: PlayerSong[] }
   /** What Player plays; `null`: nothing. */
@@ -374,17 +396,21 @@ export const GRAPHIC_FREQUENCIES: readonly number[] = Array.from(
   (_, i) => GRAPHIC_LOWEST * (GRAPHIC_HIGHEST / GRAPHIC_LOWEST) ** (i / (GRAPHIC_BANDS - 1)),
 )
 
+/** The cab's own curve, as tuned in the truck (owner 2026-11-18): what Recommended plays and a reset goes back
+ * to. The lows lifted, a dip around 80 Hz, the highs rising. */
 export const FLAT: Equalizer = {
   bass: 0,
   mid: 0,
   treble: 0,
-  advanced: false,
-  bands: new Array(GRAPHIC_BANDS).fill(0),
+  advanced: true,
+  bands: [5, 2, 0, 0, -1, 0, 0, 0, 0, 0, 0, 1, 3, 5, 7],
 }
 
 /** The tone as the host may send it: each band a whole number of dB within the range (anything else flat). */
 export function toEqualizer(value: unknown): Equalizer {
-  const told = (value ?? {}) as Partial<Record<keyof Equalizer, unknown>>
+  // Nothing said: the cab's own curve, not a flat one (the host not sending it says nothing about the tone).
+  if (value === undefined || value === null) return { ...FLAT, bands: [...FLAT.bands] }
+  const told = value as Partial<Record<keyof Equalizer, unknown>>
   const band = (db: unknown, most = EQUALIZER_MOST) =>
     typeof db === 'number' && Number.isFinite(db) ? Math.max(-most, Math.min(most, Math.round(db))) : 0
   const toldBands = Array.isArray(told.bands) ? (told.bands as unknown[]) : []
@@ -397,70 +423,57 @@ export function toEqualizer(value: unknown): Equalizer {
   }
 }
 
-/** The cab's shared reverb (`speakers::Reverb`): size 0 (compact) to 100 (long sleeper), and how audible the
- * reflections are. */
-export interface Reverb {
-  enabled: boolean
-  size: number
-  amount: number
+/** The low band's own limiter (200 Hz and under alone): where it starts pulling a peak down, the most it sends
+ * on, how softly it comes in, how fast it works, and how far ahead of a peak it looks. Kept with WestPlay's
+ * settings and played by every player (`speakers::Limiter`). */
+export interface Limiter {
+  /** dB: where gain reduction starts, and the level the low band's peaks are held at. */
+  threshold: number
+  /** dB: the most the low band sends on, ever (a hard cap, whenever it is under `threshold`). */
+  ceiling: number
+  /** dB: how far under `threshold` the reduction starts coming in (0: at once). */
+  knee: number
+  /** ms: how fast it pulls a peak down. */
+  attack: number
+  /** ms: how fast it lets go after one. */
+  release: number
+  /** ms: how far ahead of a peak it starts working. */
+  lookahead: number
 }
 
-export const REVERB_MOST = 100
-export const DEFAULT_REVERB: Reverb = { enabled: true, size: 55, amount: 32 }
+/** Each setting's range and the value it falls back to (the host's `speakers::Limiter::clamped`). */
+export const LIMITER_RANGE: Record<keyof Limiter, { least: number; most: number; step: number; falls: number }> = {
+  threshold: { least: -60, most: 0, step: 0.5, falls: 0 },
+  ceiling: { least: -60, most: 0, step: 0.5, falls: -3.5 },
+  knee: { least: 0, most: 24, step: 0.5, falls: 2 },
+  attack: { least: 0.1, most: 100, step: 0.1, falls: 11.5 },
+  release: { least: 10, most: 2000, step: 5, falls: 250 },
+  lookahead: { least: 0, most: 20, step: 0.5, falls: 2.5 },
+}
 
-export function toReverb(value: unknown): Reverb {
-  const told = (value ?? {}) as Partial<Record<keyof Reverb, unknown>>
-  const level = (number: unknown, fallback: number) =>
-    typeof number === 'number' && Number.isFinite(number)
-      ? Math.max(0, Math.min(REVERB_MOST, Math.round(number)))
-      : fallback
-  return {
-    enabled: told.enabled !== false,
-    size: level(told.size, DEFAULT_REVERB.size),
-    amount: level(told.amount, DEFAULT_REVERB.amount),
+export const DEFAULT_LIMITER: Limiter = {
+  threshold: 0,
+  ceiling: -3.5,
+  knee: 2,
+  attack: 11.5,
+  release: 250,
+  lookahead: 2.5,
+}
+
+/** The limiter as the host may send it: each setting within its range (anything else its default). */
+export function toLimiter(value: Partial<Limiter> | undefined): Limiter {
+  const each = (name: keyof Limiter) => {
+    const { least, most, falls } = LIMITER_RANGE[name]
+    const told = Number(value?.[name])
+    return Number.isFinite(told) ? Math.max(least, Math.min(most, told)) : falls
   }
-}
-
-/** The four A/B levels of the cabin model. */
-export type CabinCharacter = 'reference' | 'equalized' | 'impulse' | 'full'
-
-export const CABIN_CHARACTERS: readonly CabinCharacter[] = ['reference', 'equalized', 'impulse', 'full']
-export const DEFAULT_CABIN_CHARACTER: CabinCharacter = 'full'
-
-export function toCabinCharacter(value: unknown): CabinCharacter {
-  return CABIN_CHARACTERS.includes(value as CabinCharacter) ? (value as CabinCharacter) : DEFAULT_CABIN_CHARACTER
-}
-
-export interface CabinReflection {
-  amount: number
-}
-
-export const DEFAULT_CABIN_REFLECTION: CabinReflection = { amount: 100 }
-
-export function toCabinReflection(value: unknown): CabinReflection {
-  const amount = (value as Partial<CabinReflection> | null | undefined)?.amount
   return {
-    amount:
-      typeof amount === 'number' && Number.isFinite(amount)
-        ? Math.max(0, Math.min(100, Math.round(amount)))
-        : DEFAULT_CABIN_REFLECTION.amount,
-  }
-}
-
-export interface BassManagement {
-  cutoff: number
-}
-
-export const BASS_CUTOFF = { min: 30, max: 150, step: 5 } as const
-export const DEFAULT_BASS_MANAGEMENT: BassManagement = { cutoff: 60 }
-
-export function toBassManagement(value: unknown): BassManagement {
-  const cutoff = (value as Partial<BassManagement> | null | undefined)?.cutoff
-  return {
-    cutoff:
-      typeof cutoff === 'number' && Number.isFinite(cutoff)
-        ? Math.max(BASS_CUTOFF.min, Math.min(BASS_CUTOFF.max, Math.round(cutoff)))
-        : DEFAULT_BASS_MANAGEMENT.cutoff,
+    threshold: each('threshold'),
+    ceiling: each('ceiling'),
+    knee: each('knee'),
+    attack: each('attack'),
+    release: each('release'),
+    lookahead: each('lookahead'),
   }
 }
 
@@ -468,6 +481,9 @@ export type PageMessage =
   | { type: 'ready' }
   /** A startup stage reached (the boot screens shown), for the host's startup log. */
   | { type: 'startup'; stage: string }
+  /** The cab's guidance (the next turn it shows and how far), every 30 s while there's a route, for the host's log
+   * (cabin/maps/guidanceLog.ts). */
+  | { type: 'guidance'; line: string }
   /** Whether WestPlay is open on the truck's screen (or the truck's original screen shows): posted as the
    * page connects and whenever it changes, for the companion window. */
   | { type: 'westplay'; open: boolean }
@@ -478,20 +494,18 @@ export type PageMessage =
   /** The players' tone, set in Settings › Equalizer: the player's curve, and whether it plays (Custom) or the
    * speakers as tuned (Recommended); kept with WestPlay's settings and played by every player. */
   | ({ type: 'equalizer'; custom: boolean } & Equalizer)
-  /** The cab's shared reverb, kept with WestPlay's settings and played by every player. */
-  | ({ type: 'reverb' } & Reverb)
-  /** The amount of cabin modelling chosen in Settings › Sound. */
-  | { type: 'character'; character: CabinCharacter }
+  /** The low band's own limiter (Settings › Sound › Low Limiter), 200 Hz and under alone; kept with WestPlay's
+   * settings and played by every player. */
+  | ({ type: 'limiter' } & Limiter)
   /** The cab's EQ switch, from Settings › Sound's first row: kept, and every player told. */
   | { type: 'soundEnabled'; enabled: boolean }
   /** The preset chosen in Settings › Sound › Presets (its id; `null`: none), kept with WestPlay's settings. */
   | { type: 'preset'; id: string | null }
-  /** The cabin reflection strength chosen in Settings › Sound. */
-  | ({ type: 'reflection' } & CabinReflection)
-  /** The bass management crossover chosen in Settings › Sound. */
-  | ({ type: 'bass' } & BassManagement)
   /** The music's spectrum wanted (Settings › Equalizer open) or not: the host answers `spectrum` as it plays. */
   | { type: 'spectrum'; on: boolean }
+  /** The screen's brightness, set in Settings › Appearance: the slider's place, 0 to 1. The host scales the light of
+   * the whole frame the game shows with it (crates/host brightness.rs). */
+  | { type: 'brightness'; level: number }
   /** Whether what's under the cursor is light: the host draws it dark there. */
   | { type: 'cursorLight'; light: boolean }
   /** Where the cursor may be seen: the CarPlay area, under its black corners (shell/cursorArea.ts). */
@@ -521,10 +535,95 @@ export type PageMessage =
   | { type: 'qqMusic'; command: AppleMusicCommand }
   /** A command for NetEase Cloud Music's web player (`westplay_host::netease_music::Command`). */
   | { type: 'neteaseMusic'; command: AppleMusicCommand }
+  /** A command for radio.cn's page (`westplay_host::radio::Command`). */
+  | { type: 'radio'; command: RadioCommand }
   /** A command for YouTube Music's web player (`westplay_host::youtube_music::Command`). */
   | { type: 'youtubeMusic'; command: YouTubeMusicCommand }
   /** A command for Player's own player (`westplay_host::music_folder::Command`). */
   | { type: 'player'; command: PlayerCommand }
+  /** What the Safari app asks of its pages (`westplay_host::safari::Command`). */
+  | { type: 'safari'; command: SafariCommand }
+
+/** A Safari tab's page (`westplay_host::safari::TabState`): its address and title, whether it loads, whether it
+ * can go back or forward, its icon's address, its colour at the top (a CSS colour), whether it's full screen,
+ * the field pressed in it (a password's value as dots) and why it failed to load. */
+export interface SafariTabState {
+  url: string
+  title: string
+  loading: boolean
+  back: boolean
+  forward: boolean
+  favicon?: string
+  theme?: string
+  /** The page's own ground (its background): what of the cab edges the page takes it. */
+  ground?: string
+  fullScreen: boolean
+  /** The page has drawn something (its content loaded): the cab is cut open over it only then. */
+  painted?: boolean
+  /** `n`: which press of a field it is (a field pressed again is told again). */
+  field?: { kind: string; value: string; n?: number }
+  failed?: string
+  /** A drop-down list pressed in the page: the cab shows its options (the browser's would be a window on the PC). */
+  list?: SafariList
+}
+
+/** A page's drop-down list (`westplay_host::safari::List`): its options, the one picked (-1: none), and where it is
+ * (frame pixels from the page's top left; none: not known). */
+export interface SafariList {
+  id: string
+  options: { label: string; group?: string; disabled?: boolean }[]
+  selected: number
+  rect?: { x: number; y: number; width: number; height: number }
+}
+
+/** A page's dialog: `alert` (OK), `confirm` (OK or Cancel), `prompt` (text, with OK or Cancel). */
+export interface SafariDialog {
+  kind: 'alert' | 'confirm' | 'prompt'
+  message: string
+  text?: string
+}
+
+/** What the Safari app asks of its pages (`westplay_host::safari::Command`): a tab shown at a rectangle of the
+ * frame (pixels; `covers`: where the cab draws over it there, its own and the mouse's), and the rest. */
+export type SafariCommand =
+  | {
+      action: 'show'
+      tab: number
+      url: string
+      x: number
+      y: number
+      width: number
+      height: number
+      zoom: number
+      covers?: { x: number; y: number; width: number; height: number }[]
+      /** The cab's appearance: the pages see it as the system's. */
+      dark?: boolean
+      /** Its bottom corners' rounding (frame pixels): the page cut to it. */
+      radius?: number
+      /** The cab's language (`tr-TR`): the pages are asked for in it. */
+      language?: string
+    }
+  /** The cab's appearance changed: every page sees it (CSS `prefers-color-scheme`). */
+  | { action: 'appearance'; dark: boolean }
+  | { action: 'hide'; tab?: number }
+  | { action: 'open'; tab: number; url: string }
+  | { action: 'close'; tab: number }
+  | { action: 'back'; tab: number }
+  | { action: 'forward'; tab: number }
+  | { action: 'reload'; tab: number }
+  | { action: 'stop'; tab: number }
+  | { action: 'type'; text: string }
+  | { action: 'key'; key: 'backspace' | 'enter' }
+  | { action: 'pause' }
+  | { action: 'resume' }
+  | { action: 'level'; level: number }
+  | { action: 'answer'; tab: number; accept: boolean; text?: string }
+  | { action: 'exitFullScreen'; tab: number }
+  /** The option picked from the page's drop-down list (`index` left out: the list put away). */
+  | { action: 'pick'; tab: number; list: string; index?: number }
+  | { action: 'picture'; tab: number }
+  /** The websites' data from `since` on (ms since 1970; 0: all of it). */
+  | { action: 'forgetWebsites'; since?: number }
 
 /** What the Spotify app asks of Spotify's web player (`westplay_host::spotify::Command`), run hidden by the
  * host: its sign-in, a question (answered with `spotifyAnswer` and the same `id`), and the player's controls
@@ -783,10 +882,19 @@ export interface AppleMusicCollection {
   tracks: AppleMusicTrack[]
 }
 
+/** QQ Music's daily 30: its card and songs, or what went wrong (`apiKey`: the key, `api`: the service). */
+export interface AppleMusicDaily {
+  item: AppleMusicItem | null
+  tracks: AppleMusicTrack[]
+  error?: 'apiKey' | 'api'
+}
+
 export interface AppleMusicArtist {
   item: AppleMusicItem
   top: AppleMusicTrack[]
   sections: AppleMusicSection[]
+  /** Its albums, where the service answers them on its own (QQ Music's page shows them as a group). */
+  albums?: AppleMusicItem[]
 }
 
 export interface AppleMusicResults {
@@ -815,11 +923,15 @@ export type AppleMusicQuestion =
   | { ask: 'radio' }
   | { ask: 'browse' }
   | { ask: 'curator'; id: string }
-  | { ask: 'search'; query: string }
+  | { ask: 'search'; query: string; page?: number; group?: 'songs' | 'artists' | 'albums' | 'playlists' }
   | { ask: 'collection'; id: string }
-  | { ask: 'artist'; id: string }
+  | { ask: 'artist'; id: string; page?: number }
   | { ask: 'library'; shelf: AppleMusicShelf; sort?: string; folder?: string; language?: string }
   | { ask: 'lyrics'; id: string }
+  /** QQ Music's API key, read from its own skills page (signed in). */
+  | { ask: 'key' }
+  /** QQ Music's daily 30, from its skills API. */
+  | { ask: 'daily' }
 
 export interface AppleMusicAnswers {
   home: AppleMusicPage
@@ -832,6 +944,8 @@ export interface AppleMusicAnswers {
   artist: AppleMusicArtist
   library: AppleMusicLibrary
   lyrics: Lyrics
+  key: string
+  daily: AppleMusicDaily
 }
 
 /** A song's words, as Apple Music and Spotify answer them (`westplay_host::lyrics::Lyrics`): line by line with
@@ -840,7 +954,7 @@ export interface AppleMusicAnswers {
  * right to left. No lines: no words for the song. */
 export interface Lyrics {
   synced: boolean
-  lines: { start: number; end: number; text: string; stanza?: boolean }[]
+  lines: { start: number; end: number; text: string; translation?: string; stanza?: boolean }[]
   provider?: string
   writers?: string[]
   colors?: { background: string; text: string; highlight: string }
@@ -866,6 +980,37 @@ export interface AppleMusicPlayback {
   failed?: boolean
   next: AppleMusicTrack[]
 }
+
+/** A station as the Radio app shows it (`westplay_host::radio::Station`). */
+export interface RadioStationInfo {
+  id: string
+  /** Its province's code (`0`: the national stations). */
+  region: string
+  name: string
+  program: string
+  image: string | null
+}
+
+/** What the radio plays (`westplay_host::radio::Playback`): the station, whether it plays, whether its sound
+ * is yet to come, the volume (0 to 1), and whether it couldn't play. */
+export interface RadioPlayback {
+  station: RadioStationInfo | null
+  playing: boolean
+  loading: boolean
+  volume: number | null
+  failed?: boolean
+}
+
+/** What the Radio app asks radio.cn's page (`westplay_host::radio::Command`). */
+export type RadioCommand =
+  | { action: 'start' }
+  /** The stations of a province (`region`: its code). */
+  | { action: 'stations'; region: string }
+  /** A station, from its start; the same one again plays on. */
+  | { action: 'play'; id: string; region: string }
+  | { action: 'pause' }
+  /** The page's player's volume, 0 to 100. */
+  | { action: 'volume'; percent: number }
 
 /** What the YouTube Music app asks of YouTube Music's web player (`westplay_host::youtube_music::Command`), run
  * hidden by the host: its sign-in (Google's, YouTube's own: they share it), a question (answered with

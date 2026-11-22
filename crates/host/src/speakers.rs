@@ -37,6 +37,70 @@ pub struct Speaker {
     pub delay: f32,
 }
 
+/// The cab as a room for sound: the closed box its speakers play in (cab space, metres). Its walls, floor and
+/// ceiling are what every reflection comes from, so a model that leaves some out (a missing floor, an open side
+/// window) still sounds like a cab: the box is the cab, not the model.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Cabin {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+    /// How much its surfaces soak up, on average (0..1): a cab of fabric, carpet and plastic more than one of
+    /// leather and glass.
+    pub absorption: f32,
+}
+
+impl Cabin {
+    /// What a cab soaks up on average: not its bare shell but what fills it -- fabric seats and their foam, the
+    /// carpet, the trim, the driver. A bare box rings; a furnished cab is soft and short.
+    pub const ABSORPTION: f32 = 0.42;
+
+    /// A cab's box from a model's own box (before the head's offset is added): `None` if the model's is not a
+    /// cab's -- a width, height or depth no cab has, or a depth a whole car's (the Road Trip DLC's pickups:
+    /// their interior model is the whole vehicle, engine bay and bed included).
+    pub fn from_model_box(lo: [f32; 3], hi: [f32; 3]) -> Option<Self> {
+        let (width, height, depth) = (hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+        let cab = (1.6..=2.75).contains(&width) && (1.2..=2.9).contains(&height) && (1.5..=3.2).contains(&depth);
+        cab.then_some(Self { min: lo, max: hi, absorption: Self::ABSORPTION })
+    }
+
+    /// The box moved by `by` (a point of the model's space into cab space, as the head's default place is).
+    pub fn moved(self, by: [f32; 3]) -> Self {
+        Self { min: add(self.min, by), max: add(self.max, by), absorption: self.absorption }
+    }
+
+    /// A cab's box from its speakers' spread, for a truck the save hasn't got yet (its interior model unread):
+    /// a car's if they sit low and close together, a sleeper's otherwise.
+    pub fn from_speakers(speakers: &[Speaker]) -> Self {
+        let (low, high) = speakers.iter().fold((f32::MAX, f32::MIN), |(low, high), speaker| {
+            (low.min(speaker.at[1]), high.max(speaker.at[1]))
+        });
+        let (wide, deep, floor, roof) =
+            if high - low > 1.5 { (2.4, 2.2, -1.2, 1.0) } else { (1.9, 2.0, -1.1, 0.4) };
+        Self {
+            min: [-wide / 2.0, floor, -deep / 2.0],
+            max: [wide / 2.0, roof, deep / 2.0],
+            absorption: Self::ABSORPTION,
+        }
+    }
+
+    /// A cab whose box didn't read: a truck's day cab or sleeper's middle, by `wide` and `high` (metres).
+    pub fn fallback(wide: f32, high: f32) -> Self {
+        Self {
+            min: [-wide / 2.0, -1.2, -1.1],
+            max: [wide / 2.0, high - 1.2, 1.1],
+            absorption: Self::ABSORPTION,
+        }
+    }
+
+    /// Whether it is a cab's box: numbers, and each corner short of the cab's own size.
+    pub fn is_sound(&self) -> bool {
+        self.min.iter().chain(&self.max).all(|v| v.is_finite() && v.abs() < 8.0)
+            && self.min.iter().zip(&self.max).all(|(lo, hi)| lo < hi)
+            && (0.0..=1.0).contains(&self.absorption)
+    }
+}
+
 /// No limit that way (a band's).
 const OPEN: f32 = 0.0;
 
@@ -265,10 +329,52 @@ const ACTROS_2014: &[Speaker] = &[
     speaker([4000.0, OPEN], 0.0, Channel::Right, [1.068, 1.508, -0.237]),
 ];
 
+/// The Ford Bronco (2024, the Road Trip DLC's), as the owner marked it in the interior model (its origin the
+/// driver's head, x right): two A-pillar tweeters, a door unit each side, the dash's centre fill, and the cargo
+/// area's unit. In the car's cab space the head, the model's origin, is at (-0.4025, -1.43, 2.1117), the cab
+/// turning at (0, 3, -2) (the plugin's log, 2026-11-15): the owner's points, in that space, are these plus the
+/// head's. The levels are the owner's tuning (2026-11-15): the rear doors' and the cargo unit's louder.
+const FORD_BRONCO_24: &[Speaker] = &[
+    speaker([2000.0, OPEN], 0.0, Channel::Right, [0.634, -1.515, 1.303]),
+    speaker([2000.0, OPEN], 0.0, Channel::Left, [-0.634, -1.515, 1.303]),
+    speaker([60.0, 800.0], 0.0, Channel::Right, [0.715, -2.147, 1.350]),
+    speaker([60.0, 800.0], 5.0, Channel::Right, [0.711, -2.163, 2.424]),
+    speaker([60.0, 800.0], 5.0, Channel::Left, [-0.711, -2.163, 2.424]),
+    speaker([60.0, 800.0], 0.0, Channel::Left, [-0.714, -2.132, 1.446]),
+    speaker([300.0, 3000.0], 0.0, Channel::Both, [-0.006, -1.580, 1.117]),
+    speaker([OPEN, 90.0], 10.0, Channel::Left, [-0.003, -2.123, 3.133]),
+];
+
+/// The Ford F-150 (2023, the Road Trip DLC's), as the owner marked it in the Lariat interior model (its origin
+/// the driver's head, x right): a tweeter in each A-pillar, a mid-woofer and a midrange in each front door, the
+/// dash's centre, a mid-woofer and a tweeter in each rear door, two overhead units each row, and the cargo area's
+/// subwoofer. In the car's cab space the head, the model's origin, is at (-0.459, -1.400, 1.657), the cab turning
+/// at (0, 3, -2) (the plugin's log, 2026-11-15): the owner's points, in that space, are these plus the head's.
+const FORD_F150_23: &[Speaker] = &[
+    speaker([4000.0, OPEN], 0.0, Channel::Right, [0.681, -1.600, 0.578]),
+    speaker([4000.0, OPEN], 0.0, Channel::Left, [-0.681, -1.600, 0.578]),
+    speaker([50.0, 300.0], 0.0, Channel::Right, [0.800, -2.064, 0.849]),
+    speaker([50.0, 300.0], 0.0, Channel::Left, [-0.800, -2.064, 0.849]),
+    speaker([300.0, 4000.0], 0.0, Channel::Right, [0.866, -1.821, 1.010]),
+    speaker([300.0, 4000.0], 0.0, Channel::Left, [-0.866, -1.821, 1.010]),
+    speaker([300.0, 4000.0], -3.0, Channel::Both, [0.005, -1.559, 0.657]),
+    speaker([50.0, 400.0], 0.0, Channel::Right, [0.798, -2.125, 2.093]),
+    speaker([50.0, 400.0], 0.0, Channel::Left, [-0.798, -2.125, 2.093]),
+    speaker([4000.0, OPEN], 0.0, Channel::Right, [0.839, -1.805, 2.041]),
+    speaker([4000.0, OPEN], 0.0, Channel::Left, [-0.839, -1.805, 2.041]),
+    speaker([400.0, 6000.0], -10.0, Channel::Right, [0.510, -1.180, 1.582]),
+    speaker([400.0, 6000.0], -10.0, Channel::Left, [-0.510, -1.180, 1.582]),
+    speaker([400.0, 6000.0], -10.0, Channel::Right, [0.555, -1.177, 2.646]),
+    speaker([400.0, 6000.0], -10.0, Channel::Left, [-0.555, -1.177, 2.646]),
+    speaker([OPEN, 80.0], 7.0, Channel::Both, [-0.025, -2.257, 2.720]),
+];
+
 /// The speakers of the truck with this SDK model id (with or without its `vehicle.` prefix), or `None` for a
 /// truck whose speakers aren't known (its sound plays as it is).
 pub fn in_truck(id: &str) -> Option<&'static [Speaker]> {
     match id.strip_prefix("vehicle.").unwrap_or(id) {
+        "ford.bronco_24" => Some(FORD_BRONCO_24),
+        "ford.f150_23" => Some(FORD_F150_23),
         // The S BEV: the S's cab, its own interior the S's but for the dashboard and seats (doors, pillars, roof
         // grille alike), turned on the same point (owner 2026-10-26: "same cab with S, no difference").
         "scania.s_2016" | "scania.s_2024e" => Some(SCANIA_S),
@@ -289,6 +395,210 @@ pub fn in_truck(id: &str) -> Option<&'static [Speaker]> {
         "daf.xd" => Some(DAF_XD),
         _ => None,
     }
+}
+
+/// A coach body's speakers (the Coaches DLC's: their real ones have a cockpit system and a passengers' one, owner
+/// 2026-11-13), in its interior model's own space: metres from the driver's head (the model's origin, as in every
+/// truck measured: the MAN Lion's Coach's steering wheel at x 0), x right, y up, z back. Two sets, the companion's
+/// setting choosing which plays ([`crate::settings::CoachSpeakers`]): the driver's, round the driver's seat, and the
+/// passengers', every overhead unit along the aisle. Found in the interior models by their grilles' textures
+/// (examples/cab_model and the decoded `details` textures), the driver's where the owner confirmed them in the game.
+///
+/// The body is the vehicle's being driven, as the game tells it the moment the player gets in (owner 2026-11-13: the
+/// current vehicle, never the save, which has no coach bought or taken since it was written): its model, and its axles
+/// (`TruckInfo::axles`). Each coach chassis fits one body only (its `suitable_for`), the interior too: two axles
+/// (4x2) the short body, three (6x2/4) the long.
+pub struct Coach {
+    /// The model, as the SDK names it less `vehicle.` (`man.lions_24`).
+    pub model: &'static str,
+    /// The axles of the body's only chassis.
+    pub axles: u32,
+    /// The body's interior (its definition's name), for the log.
+    pub interior: &'static str,
+    /// The driver's speakers.
+    pub driver: &'static [[f32; 3]],
+    /// The overhead units' rows: each one's x, height and its units' places along the coach (z).
+    pub rows: &'static [Row],
+}
+
+/// A row of a coach's overhead units: the grilles' centres, on the units' centre line (x), at their face's height (y),
+/// one at each z (each unit's grille centre, from its plate's texture mapping).
+pub struct Row {
+    pub x: f32,
+    pub y: f32,
+    pub z: &'static [f32],
+}
+
+/// The MAN Lion's Coach's driver's speakers (both bodies): a round unit low beside each of the driver's legs (owner's
+/// screenshots, 2026-11-13), the large round grille of its `details` texture: on the left side panel, and on the
+/// console's side right of the steering column.
+const MAN_LIONS_DRIVER: &[[f32; 3]] = &[[-0.388, -0.983, -0.738], [0.305, -0.832, -0.845]];
+/// The MAN's overhead units' rows: a perforated half-oval at each unit's rear end, 16 x 9 cm, in every unit (the
+/// rear ones' flat plates map the same part of the texture), the right row broken by the middle door.
+const MAN_LIONS_121: &[Row] = &[
+    Row {
+        x: -0.195,
+        y: 0.951,
+        z: &[0.989, 1.754, 2.530, 3.295, 4.060, 4.825, 5.590, 6.355, 7.119, 7.884, 8.649, 9.414, 9.979],
+    },
+    Row { x: 1.564, y: 0.952, z: &[0.889, 1.639, 2.400, 3.150, 3.900, 6.355, 7.119, 7.884, 8.649, 9.414, 9.979] },
+];
+const MAN_LIONS_139: &[Row] = &[
+    Row {
+        x: -0.195,
+        y: 0.951,
+        z: &[
+            0.989, 1.754, 2.530, 3.295, 4.060, 4.825, 5.590, 6.355, 7.119, 7.884, 8.649, 9.414, 10.179, 10.944, 11.780,
+        ],
+    },
+    Row {
+        x: 1.564,
+        y: 0.952,
+        z: &[0.889, 1.639, 2.400, 3.150, 3.900, 4.826, 7.119, 7.884, 8.649, 9.414, 10.179, 10.944, 11.780],
+    },
+];
+/// The Scania Touring's driver's speakers (both bodies): the round grille with four screws of its `details` texture,
+/// by the driver's left leg and at the dashboard's right end by the entrance step, facing back (owner's screenshot,
+/// 2026-11-13). Its compartment lids over the door and the driver's seat are plain panels, not speakers.
+const SCANIA_TOURING_DRIVER: &[[f32; 3]] = &[[-0.355, -0.874, -0.822], [1.708, -0.739, -0.943]];
+/// The Scania Touring's overhead units' rows: a round grille, about 10 cm, on each unit's centre line.
+const SCANIA_TOURING_129: &[Row] = &[
+    Row {
+        x: -0.144,
+        y: 0.972,
+        z: &[0.821, 1.579, 2.337, 3.096, 3.854, 4.612, 5.371, 6.129, 6.887, 7.646, 8.404, 9.162, 9.917, 10.682],
+    },
+    Row {
+        x: 1.434,
+        y: 0.972,
+        z: &[0.549, 1.298, 2.048, 2.797, 3.547, 6.193, 6.942, 7.692, 8.441, 9.191, 9.917, 10.682],
+    },
+];
+const SCANIA_TOURING_137: &[Row] = &[
+    Row {
+        x: -0.144,
+        y: 0.972,
+        z: &[0.821, 1.579, 2.337, 3.096, 3.854, 4.612, 5.371, 6.129, 6.887, 7.646, 8.404, 9.162, 9.917, 10.682, 11.447],
+    },
+    Row {
+        x: 1.434,
+        y: 0.972,
+        z: &[0.549, 1.298, 2.048, 2.797, 3.547, 6.193, 6.942, 7.692, 8.441, 9.191, 9.917, 10.682, 11.447],
+    },
+];
+/// The Volvo 9700's driver's speakers: a pair on the partition behind the driver's head, each side of the headrest,
+/// 13.6 cm fabric covers (owner's screenshot, 2026-11-13; the real coach's cockpit zone, its audio unit's "cockpit"
+/// knob).
+const VOLVO_9700_DRIVER: &[[f32; 3]] = &[[-0.411, 0.129, 0.365], [0.105, 0.129, 0.365]];
+/// The Volvo 9700's overhead units: only the front ones are modelled (the rest of its cabin is a low-detail model
+/// with one baked texture), a perforated grille near each one's front.
+const VOLVO_9700_143: &[Row] =
+    &[Row { x: -0.331, y: 0.082, z: &[4.878, 5.716] }, Row { x: 1.705, y: 0.082, z: &[3.130, 4.031, 4.932] }];
+
+/// The coach bodies: each model's by its chassis' axles (`121_4x2`, `139_6x24`, `129_4x2`, `137_6x24`, `143_6x24`).
+const COACHES: &[Coach] = &[
+    Coach {
+        model: "man.lions_24",
+        axles: 2,
+        interior: "standard_121h4",
+        driver: MAN_LIONS_DRIVER,
+        rows: MAN_LIONS_121,
+    },
+    Coach {
+        model: "man.lions_24",
+        axles: 3,
+        interior: "standard_139h6",
+        driver: MAN_LIONS_DRIVER,
+        rows: MAN_LIONS_139,
+    },
+    Coach {
+        model: "scania.touring_23",
+        axles: 2,
+        interior: "standard_129h4",
+        driver: SCANIA_TOURING_DRIVER,
+        rows: SCANIA_TOURING_129,
+    },
+    Coach {
+        model: "scania.touring_23",
+        axles: 3,
+        interior: "standard_137h6",
+        driver: SCANIA_TOURING_DRIVER,
+        rows: SCANIA_TOURING_137,
+    },
+    Coach {
+        model: "volvo.9700_23",
+        axles: 3,
+        interior: "standard_143d6",
+        driver: VOLVO_9700_DRIVER,
+        rows: VOLVO_9700_143,
+    },
+];
+
+/// The coach body of the vehicle `id` (the SDK's, with or without `vehicle.`) standing on `axles` axles, if it's one.
+pub fn coach(id: &str, axles: u32) -> Option<&'static Coach> {
+    let model = id.strip_prefix("vehicle.").unwrap_or(id);
+    COACHES.iter().find(|coach| coach.model == model && coach.axles == axles)
+}
+
+/// Whether the vehicle `id` is one of the coaches (any body).
+pub fn is_coach(id: &str) -> bool {
+    let model = id.strip_prefix("vehicle.").unwrap_or(id);
+    COACHES.iter().any(|coach| coach.model == model)
+}
+
+/// How fast sound goes (m/s): a coach's far units heard later.
+const SOUND_SPEED: f32 = 343.0;
+/// The passengers' overhead units' band (Hz): small ceiling units, little deep bass from them.
+const CEILING_BAND: [f32; 2] = [100.0, 16_000.0];
+
+impl Coach {
+    /// The driver's speakers placed from `head` (the SDK's default head: the interior model's origin, cab space):
+    /// each its side's whole sound, as a coach's cockpit units play it, tuned to the seat as an installer tunes them,
+    /// the nearer ones later and quieter so that every unit's sound reaches the head at once and as loud (the Scania's
+    /// entrance unit is 2 m away, its left one 1.3).
+    pub fn driver_speakers(&self, head: [f32; 3]) -> Vec<Speaker> {
+        let farthest = self.driver.iter().map(|at| distance(*at)).fold(0.0, f32::max);
+        self.driver
+            .iter()
+            .map(|&at| {
+                let near = distance(at);
+                Speaker {
+                    delay: (farthest - near) / SOUND_SPEED * 1000.0,
+                    ..speaker([OPEN, OPEN], 20.0 * (near / farthest).log10(), side(at), add(head, at))
+                }
+            })
+            .collect()
+    }
+
+    /// The passengers' overhead units placed from `head`: each its row's side, [`CEILING_BAND`], heard from the
+    /// driver's seat as they sit (not tuned to it: a coach's cabin system is the passengers'), the further back the
+    /// later by sound's own speed, as loud as each is from there.
+    pub fn passenger_speakers(&self, head: [f32; 3]) -> Vec<Speaker> {
+        let units: Vec<[f32; 3]> =
+            self.rows.iter().flat_map(|row| row.z.iter().map(move |&z| [row.x, row.y, z])).collect();
+        let nearest = units.iter().map(|at| distance(*at)).fold(f32::MAX, f32::min);
+        units
+            .iter()
+            .map(|&at| Speaker {
+                delay: (distance(at) - nearest) / SOUND_SPEED * 1000.0,
+                ..speaker(CEILING_BAND, 0.0, side(at), add(head, at))
+            })
+            .collect()
+    }
+}
+
+/// How far a point of an interior model is from the driver's head (its origin), metres.
+fn distance([x, y, z]: [f32; 3]) -> f32 {
+    (x * x + y * y + z * z).sqrt()
+}
+
+/// A coach speaker's side: left of the driver's head (the model's x 0), or right.
+fn side(at: [f32; 3]) -> Channel {
+    if at[0] < 0.0 { Channel::Left } else { Channel::Right }
+}
+
+fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
 /// What a speaker of a truck's part does where it sits, which sets what it plays ([`assemble`]).
@@ -871,7 +1181,8 @@ const IVECO_STRALIS: &[PartModels] = &[
     },
 ];
 
-/// The trucks whose speakers come from their parts (their SDK model ids, with or without `vehicle.`).
+/// The trucks whose speakers come from their parts (their SDK model ids, with or without `vehicle.`); the coaches too,
+/// whose interior names their body ([`coach`]).
 pub fn by_parts(id: &str) -> bool {
     matches!(
         id.strip_prefix("vehicle.").unwrap_or(id),
@@ -1077,7 +1388,7 @@ impl Head {
 /// The player's tone controls, as a car stereo's (the cab's Settings › Sound): how much of the bass, the mids and
 /// the treble, in dB each, [`Equalizer::MOST`] either way. One for every truck (owner 2026-10-22), on all the
 /// sound the players play, before it's split to the speakers (a truck whose speakers aren't known too).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Equalizer {
     pub bass: i8,
@@ -1095,6 +1406,20 @@ pub const GRAPHIC_BANDS: usize = 15;
 /// The graphic curve's lowest and highest bands, Hz: the ends of the 15, two-thirds of an octave apart.
 pub const GRAPHIC_LOWEST: f32 = 25.0;
 pub const GRAPHIC_HIGHEST: f32 = 16000.0;
+
+impl Default for Equalizer {
+    /// The cab's own curve, tuned in the truck (owner 2026-11-18): the lows lifted, a dip around 80 Hz, the
+    /// highs rising. Recommended plays it; Custom starts from it.
+    fn default() -> Self {
+        Self {
+            bass: 0,
+            mid: 0,
+            treble: 0,
+            advanced: true,
+            bands: [5, 2, 0, 0, -1, 0, 0, 0, 0, 0, 0, 1, 3, 5, 7],
+        }
+    }
+}
 
 impl Equalizer {
     /// How far each band goes, dB (owner 2026-10-22: a car stereo's tone range).
@@ -1116,93 +1441,57 @@ impl Equalizer {
     }
 }
 
-/// The cabin's shared reverb: the reflections every player's sound makes in the truck's cab. `size` is the
-/// room's scale from a compact day cab (0) to a long sleeper (100); `amount` is how loud the reflections are.
-/// The sound field keeps the dry sound placed at each speaker and adds this as the cab's diffuse return.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct Reverb {
-    pub enabled: bool,
-    pub size: i8,
-    pub amount: i8,
+/// The low band's own limiter (Settings › Sound › Low Limiter), on 200 Hz and under alone (cab_sound.js): where
+/// it starts pulling peaks down and the level it holds them at, the most it sends on ever, how softly it comes
+/// in, how fast it works, and how far ahead of a peak it starts. Saved with WestPlay's settings and played by
+/// every player.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Limiter {
+    /// Where gain reduction starts, and the level the low band's peaks are held at, dB.
+    pub threshold: f32,
+    /// The most the low band sends on, dB: a hard cap, whenever that is under `threshold`.
+    pub ceiling: f32,
+    /// How far under `threshold` the reduction starts coming in, dB (0: at once).
+    pub knee: f32,
+    /// How fast it pulls a peak down, ms.
+    pub attack: f32,
+    /// How fast it lets go after one, ms.
+    pub release: f32,
+    /// How far ahead of a peak it starts working, ms.
+    pub lookahead: f32,
 }
 
-impl Reverb {
-    pub const MOST: i8 = 100;
-
-    pub fn clamped(self) -> Self {
-        let clamp = |value: i8| value.clamp(0, Self::MOST);
-        Self { enabled: self.enabled, size: clamp(self.size), amount: clamp(self.amount) }
-    }
-}
-
-impl Default for Reverb {
+impl Default for Limiter {
+    /// Gentle enough to stay out of the way: it comes in only where several low units would otherwise add up
+    /// past full (the bass that clips a truck fitted with more than one).
     fn default() -> Self {
-        Self { enabled: true, size: 55, amount: 32 }
+        Self {
+            threshold: 0.0,
+            ceiling: -3.5,
+            knee: 2.0,
+            attack: 11.5,
+            release: 250.0,
+            lookahead: 2.5,
+        }
     }
 }
 
-/// How much of the cabin model every player uses (Settings › Sound › Cabin Character).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum CabinCharacter {
-    /// The direct speaker field only.
-    Reference,
-    /// A conservative car-cabin transfer curve and gentle bus compression.
-    Equalized,
-    /// A short measured-style early-reflection response, without the long reverb.
-    Impulse,
-    /// The cabin curve and early reflections together; diffuse reverb remains independently controlled.
-    #[default]
-    Full,
-    /// Everything the cabin does off (Settings › Sound's EQ switch): the players play the truck's speakers as
-    /// they're placed and nothing else, with no tone, cabin, space or bass shaping at all. Not one of the four
-    /// steps the Character page offers: the switch, not a choice of character.
-    Off,
-}
-
-/// Strength of the cabin's discrete early reflections (`0`: none, `100`: the modelled level).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct CabinReflection {
-    pub amount: i8,
-}
-
-impl CabinReflection {
-    pub const MOST: i8 = 100;
-
+impl Limiter {
+    /// Each setting within its range, and nothing a file says in place of a number kept as one.
     pub fn clamped(self) -> Self {
-        Self { amount: self.amount.clamp(0, Self::MOST) }
-    }
-}
-
-impl Default for CabinReflection {
-    fn default() -> Self {
-        Self { amount: 100 }
-    }
-}
-
-/// Always-on bass management: the crossover below which the cabin sums both channels to mono before the
-/// directional speaker field. Real sub-bass carries little useful direction; keeping it out of HRTF avoids
-/// the whole low end moving with a turn of the head.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct BassManagement {
-    pub cutoff: u8,
-}
-
-impl BassManagement {
-    pub const LOW: u8 = 30;
-    pub const HIGH: u8 = 150;
-
-    pub fn clamped(self) -> Self {
-        Self { cutoff: self.cutoff.clamp(Self::LOW, Self::HIGH) }
-    }
-}
-
-impl Default for BassManagement {
-    fn default() -> Self {
-        Self { cutoff: 60 }
+        let default = Self::default();
+        let keep = |value: f32, fallback: f32, most: f32, least: f32| {
+            if value.is_finite() { value.clamp(least, most) } else { fallback }
+        };
+        Self {
+            threshold: keep(self.threshold, default.threshold, 0.0, -60.0),
+            ceiling: keep(self.ceiling, default.ceiling, 0.0, -60.0),
+            knee: keep(self.knee, default.knee, 24.0, 0.0),
+            attack: keep(self.attack, default.attack, 100.0, 0.1),
+            release: keep(self.release, default.release, 2000.0, 10.0),
+            lookahead: keep(self.lookahead, default.lookahead, 20.0, 0.0),
+        }
     }
 }
 
@@ -1227,12 +1516,12 @@ pub fn spectrum_message(bars: &[u8]) -> String {
     serde_json::json!({ "type": "spectrum", "bars": bars }).to_string()
 }
 
-/// Whether speakers are ones a cab can have: a handful, each in a cab-sized space, playing what can be heard,
-/// at a sensible level.
+/// Whether speakers are ones a vehicle can have: a cab's handful or a coach's rows ([`MOST_SPEAKERS`]), each within a
+/// coach's length of its cab's middle, playing what can be heard, at a sensible level.
 pub fn are_sound(speakers: &[Speaker]) -> bool {
-    speakers.len() <= 16
+    speakers.len() <= MOST_SPEAKERS
         && speakers.iter().all(|s| {
-            s.at.iter().all(|v| v.is_finite() && v.abs() < 10.0)
+            s.at.iter().all(|v| v.is_finite() && v.abs() < 16.0)
                 && s.band.iter().all(|f| f.is_finite() && (0.0..=24_000.0).contains(f))
                 && (s.band[1] == OPEN || s.band[0] < s.band[1])
                 && s.level.is_finite()
@@ -1241,9 +1530,73 @@ pub fn are_sound(speakers: &[Speaker]) -> bool {
         })
 }
 
+/// The most speakers a vehicle may have: a coach's overhead units (28 in the longest bodies) and a few more.
+pub const MOST_SPEAKERS: usize = 32;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The MAN Lion's Coach's driver's head in the cab, as the SDK said it (the owner's plugin log, 2026-11-13).
+    const MAN_HEAD: [f32; 3] = [-0.685, -0.8, -2.3];
+
+    #[test]
+    fn each_coach_body_has_its_driver_pair_and_its_overhead_units() {
+        for (id, axles, interior, overhead) in [
+            ("vehicle.man.lions_24", 2, "standard_121h4", 24),
+            ("vehicle.man.lions_24", 3, "standard_139h6", 28),
+            ("vehicle.scania.touring_23", 2, "standard_129h4", 26),
+            ("scania.touring_23", 3, "standard_137h6", 28),
+            ("vehicle.volvo.9700_23", 3, "standard_143d6", 5),
+        ] {
+            let coach = coach(id, axles).expect(interior);
+            assert_eq!(coach.interior, interior);
+            let (driver, passengers) = (coach.driver_speakers(MAN_HEAD), coach.passenger_speakers(MAN_HEAD));
+            assert_eq!((driver.len(), passengers.len()), (2, overhead), "{interior}");
+            assert!(are_sound(&driver) && are_sound(&passengers), "{interior}");
+            // A side each: the driver's pair left and right, each row its own.
+            let channels = |speakers: &[Speaker]| speakers.iter().map(|s| s.channel).collect::<Vec<_>>();
+            assert_eq!(channels(&driver), [Channel::Left, Channel::Right], "{interior}");
+            for speaker in &passengers {
+                let left = speaker.at[0] < MAN_HEAD[0];
+                assert_eq!(speaker.channel, if left { Channel::Left } else { Channel::Right }, "{interior}");
+                assert_eq!(speaker.band, CEILING_BAND);
+            }
+        }
+        // No body on other axles, no coach of another model; and none waits for the save's parts.
+        assert!(coach("vehicle.volvo.9700_23", 2).is_none() && coach("vehicle.man.lions_24", 4).is_none());
+        assert!(coach("vehicle.man.tgx_2020", 2).is_none());
+        for id in ["vehicle.man.lions_24", "scania.touring_23", "vehicle.volvo.9700_23"] {
+            assert!(!by_parts(id), "{id}");
+        }
+    }
+
+    #[test]
+    fn the_drivers_pair_reaches_the_head_at_once_and_as_loud() {
+        // The Scania Touring's: its left unit 1.3 m from the head, its entrance one 2 m.
+        let coach = coach("vehicle.scania.touring_23", 2).unwrap();
+        let speakers = coach.driver_speakers(MAN_HEAD);
+        let from_head = |s: &Speaker| distance([s.at[0] - MAN_HEAD[0], s.at[1] - MAN_HEAD[1], s.at[2] - MAN_HEAD[2]]);
+        let arrival = |s: &Speaker| from_head(s) / SOUND_SPEED * 1000.0 + s.delay;
+        assert!((arrival(&speakers[0]) - arrival(&speakers[1])).abs() < 0.01);
+        assert!(speakers[0].delay > 1.0 && speakers[1].delay == 0.0, "{speakers:?}");
+        // As loud: each one's level against its fall with distance (1 / distance) evens them.
+        let heard = |s: &Speaker| s.level - 20.0 * from_head(s).log10();
+        assert!((heard(&speakers[0]) - heard(&speakers[1])).abs() < 0.01);
+        assert!(speakers.iter().all(|s| s.level <= 0.0 && s.band == [OPEN, OPEN]));
+    }
+
+    #[test]
+    fn the_overhead_units_are_heard_later_the_further_back() {
+        let coach = coach("vehicle.man.lions_24", 3).unwrap();
+        let speakers = coach.passenger_speakers(MAN_HEAD);
+        let nearest = speakers.iter().map(|s| s.delay).fold(f32::MAX, f32::min);
+        assert_eq!(nearest, 0.0);
+        let last = speakers.iter().max_by(|a, b| a.at[2].total_cmp(&b.at[2])).unwrap();
+        // The last row's units, 11.8 m back: about 30 ms after the first.
+        assert!((25.0..40.0).contains(&last.delay), "{}", last.delay);
+        assert!(speakers.iter().all(|s| s.level == 0.0));
+    }
 
     #[test]
     fn knows_the_scania_s_by_its_id_with_or_without_the_prefix() {
@@ -1363,25 +1716,26 @@ mod tests {
         assert_eq!(kept.bands, [Equalizer::GRAPHIC_MOST; GRAPHIC_BANDS]);
         let low = Equalizer { bands: [-40; GRAPHIC_BANDS], ..Default::default() };
         assert_eq!(low.clamped().bands, [-Equalizer::GRAPHIC_MOST; GRAPHIC_BANDS]);
-        // Not advanced by default (the three bands play), and its bands still flat.
-        assert!(!Equalizer::default().advanced);
-        assert_eq!(Equalizer::default().bands, [0; GRAPHIC_BANDS]);
+        // The cab's own curve by default (Advanced on, its bands as tuned in the truck).
+        assert!(Equalizer::default().advanced);
+        assert_eq!(Equalizer::default().bands, [5, 2, 0, 0, -1, 0, 0, 0, 0, 0, 0, 1, 3, 5, 7]);
     }
 
     #[test]
-    fn cabin_reverb_uses_the_whole_room_and_level_range() {
-        let wild = Reverb { enabled: true, size: -20, amount: 120 };
-        assert_eq!(wild.clamped(), Reverb { enabled: true, size: 0, amount: 100 });
-        assert_eq!(Reverb::default().clamped(), Reverb::default());
-    }
-
-    #[test]
-    fn cabin_reflection_and_bass_management_keep_their_ranges() {
-        assert_eq!(CabinReflection { amount: 120 }.clamped(), CabinReflection { amount: 100 });
-        assert_eq!(CabinReflection { amount: -3 }.clamped(), CabinReflection { amount: 0 });
-        assert_eq!(BassManagement { cutoff: 10 }.clamped(), BassManagement { cutoff: 30 });
-        assert_eq!(BassManagement { cutoff: 200 }.clamped(), BassManagement { cutoff: 150 });
-        assert_eq!(BassManagement::default(), BassManagement { cutoff: 60 });
+    fn keeps_the_limiter_within_its_ranges() {
+        assert_eq!(Limiter::default().clamped(), Limiter::default());
+        let wild = Limiter {
+            threshold: 40.0,
+            ceiling: f32::NAN,
+            knee: -3.0,
+            attack: 0.0,
+            release: 1e9,
+            lookahead: 30.0,
+        };
+        assert_eq!(
+            wild.clamped(),
+            Limiter { threshold: 0.0, ceiling: -3.5, knee: 0.0, attack: 0.1, release: 2000.0, lookahead: 20.0 }
+        );
     }
 
     #[test]

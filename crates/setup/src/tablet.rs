@@ -217,7 +217,7 @@ pub fn files(
         files.push((format!("{DIR}/{name}.pmg"), model(texture_height, Origin::Top(pitch as f32 / 10.0))?));
         files.push((format!("{DIR}/{name}.pmd"), descriptor()?));
     }
-    for spot in spots.iter().filter(|spot| !vehicle_apart(&spot.truck) && !own_screen(&spot.truck)) {
+    for spot in spots.iter().filter(|spot| !vehicle_apart(&spot.truck)) {
         let model = match spot.slot {
             Slot::Hanging => hanging_model(tenths(&spot.truck)),
             Slot::DashboardSet => NAME.to_owned(),
@@ -282,12 +282,6 @@ fn pitch_of([w, x, y, z]: [f32; 4]) -> f32 {
     up.clamp(-1.0, 1.0).asin().to_degrees()
 }
 
-/// Whether WestPlay draws on `truck`'s own screen (a mod vehicle's: [`crate::game_mod::mod_screen_trucks`]): no
-/// tablet there.
-fn own_screen(truck: &str) -> bool {
-    crate::game_mod::mod_screen_trucks().any(|own| own == truck)
-}
-
 /// Where a spot's accessory is defined.
 fn definition_path(spot: &Spot) -> String {
     format!("def/vehicle/truck/{}/accessory/{}/{NAME}.sii", spot.truck, spot.slot.folder())
@@ -295,12 +289,12 @@ fn definition_path(spot: &Spot) -> String {
 
 /// The trucks' slots for the tablet in `files` (the game, its DLCs, a mod), sorted: each truck's hanging items
 /// and dashboard sets it has, of those whose name the tablet's own can be made of (each part a token: a mod's
-/// folder named otherwise is no truck the game has). Not the vehicles WestPlay draws on the own screen of
-/// (`game_mod::mod_screen_trucks`: Oyuncuyusbis' coaches; owner 2026-10-24: "Tablets should NOT appear in buses").
+/// folder named otherwise is no truck the game has). The coaches whose Gps part WestPlay draws on too: the tablet
+/// fitted in one takes WestPlay over from it (owner 2026-11-13).
 pub fn trucks(files: &GameFiles) -> Result<Vec<Spot>, String> {
     let mut spots = Vec::new();
     for truck in files.dirs("def/vehicle/truck").map_err(|error| error.to_string())? {
-        if !truck.split('.').all(|part| string_to_token(part).is_some()) || own_screen(&truck) {
+        if !truck.split('.').all(|part| string_to_token(part).is_some()) {
             continue;
         }
         let slots = files.dirs(&format!("def/vehicle/truck/{truck}/accessory")).map_err(|error| error.to_string())?;
@@ -393,7 +387,7 @@ fn set_apart(path: &Path, mounted: &GameFiles) -> bool {
 }
 
 /// Vehicles never given the tablet whatever mod lists them, by their ids' hashes (`city_hash64`).
-const APART_VEHICLES: &[u64] = &[0xb162_96d6_78c2_d0a8, 0x1cb7_e722_157f_00ff, 0xa8ee_42b0_2d21_0c49];
+const APART_VEHICLES: &[u64] = &[0xb162_96d6_78c2_d0a8, 0x1cb7_e722_157f_00ff];
 
 /// Whether the vehicle `truck` (its id) is one of [`APART_VEHICLES`] (or any of its parts is).
 fn vehicle_apart(truck: &str) -> bool {
@@ -458,10 +452,11 @@ fn body_material() -> String {
 }
 
 /// Its screen: the game's own GPS screen material (`/automat/d8/d8187d0c1f48c659.mat`, the Scania's too: lit
-/// at night as a screen is), on WestPlay's texture.
+/// at night as a screen is), on WestPlay's texture; by day at 1500 rather than the trucks' 2000 (owner 2026-11-11:
+/// "unacceptably bright"), 10 at night as theirs.
 fn screen_material(texture: &str) -> String {
     format!(
-        "effect : \"eut2.dif.lum.rfx\" {{\n\tadditional_ambient : 0.000000\n\tdiffuse : {{ 0.132868 , 0.132868 , 0.132868 }}\n\tluminance_night : 10.000000\n\tluminance_output : 2000.000000\n\treflection : 0.000000\n\tshininess : 40.000000\n\tspecular : {{ 0.010023 , 0.010023 , 0.010023 }}\n\ttexture : \"texture_base\" {{\n\t\tsource : \"{texture}\"\n\t\tsampler : default\n\t}}\n}}\n"
+        "effect : \"eut2.dif.lum.rfx\" {{\n\tadditional_ambient : 0.000000\n\tdiffuse : {{ 0.132868 , 0.132868 , 0.132868 }}\n\tluminance_night : 10.000000\n\tluminance_output : 1500.000000\n\treflection : 0.000000\n\tshininess : 40.000000\n\tspecular : {{ 0.010023 , 0.010023 , 0.010023 }}\n\ttexture : \"texture_base\" {{\n\t\tsource : \"{texture}\"\n\t\tsampler : default\n\t}}\n}}\n"
     )
 }
 
@@ -1081,9 +1076,9 @@ mod tests {
             "mercedes.actros2014/accessory/toyhang",
             "scania.s_2016/accessory/set_glass",
             "odd.truck/accessory/toystand",
-            // A coach WestPlay draws on the own screen of: no tablet.
-            "t16shd/accessory/toyhang",
-            "t16shd/accessory/set_dashbrd",
+            // A coach WestPlay draws on the own screen of: the tablet too, taking WestPlay over from it.
+            "setradt531/accessory/toyhang",
+            "setradt531/accessory/set_dashbrd",
         ] {
             std::fs::create_dir_all(root.join("def/vehicle/truck").join(slot)).unwrap();
         }
@@ -1094,7 +1089,9 @@ mod tests {
             [
                 Spot::new("daf.xf", Slot::Hanging),
                 Spot::new("daf.xf", Slot::DashboardSet),
-                Spot::new("mercedes.actros2014", Slot::Hanging)
+                Spot::new("mercedes.actros2014", Slot::Hanging),
+                Spot::new("setradt531", Slot::Hanging),
+                Spot::new("setradt531", Slot::DashboardSet)
             ]
         );
         let pitches = BTreeMap::from([("daf.xf".to_owned(), -5.0)]);
@@ -1107,7 +1104,9 @@ mod tests {
                 "def/vehicle/addon_hookup_storage.westplay.sii",
                 "def/vehicle/truck/daf.xf/accessory/toyhang/westplay_tablet.sii",
                 "def/vehicle/truck/daf.xf/accessory/set_dashbrd/westplay_tablet.sii",
-                "def/vehicle/truck/mercedes.actros2014/accessory/toyhang/westplay_tablet.sii"
+                "def/vehicle/truck/mercedes.actros2014/accessory/toyhang/westplay_tablet.sii",
+                "def/vehicle/truck/setradt531/accessory/toyhang/westplay_tablet.sii",
+                "def/vehicle/truck/setradt531/accessory/set_dashbrd/westplay_tablet.sii"
             ]
         );
         let text =
@@ -1145,6 +1144,9 @@ mod tests {
         }
         let screen = files.iter().find(|(path, _)| path.ends_with("screen.mat")).unwrap();
         assert!(String::from_utf8_lossy(&screen.1).contains("source : \"/material/ui/westplay/screen_tablet.tobj\""));
+        // Lit less than the trucks' own screens by day (owner: "unacceptably bright"), as they are at night.
+        let lit = String::from_utf8_lossy(&screen.1);
+        assert!(lit.contains("luminance_output : 1500.000000") && lit.contains("luminance_night : 10.000000"), "{lit}");
         // The icon: 256 x 256.
         let icon =
             &files.iter().find(|(path, _)| path.ends_with("westplay_tablet.dds") && path.contains("ui")).unwrap().1;
@@ -1210,8 +1212,21 @@ mod tests {
             assert!(westplay_shared::vehicle_marked(id, &marks), "{id}");
         }
         assert!(APART_VEHICLES.iter().all(|mark| marks.contains(mark)));
-        assert!(westplay_shared::vehicle_marked(&veiled(&[0x2e, 0x6b, 0x6c, 0x29, 0x32, 0x3e]), &marks));
+        // Given the tablet again (owner 2026-11-14), on TruckersMP too.
+        assert!(!westplay_shared::vehicle_marked(&veiled(&[0x2e, 0x6b, 0x6c, 0x29, 0x32, 0x3e]), &marks));
         assert!(!westplay_shared::vehicle_marked("vehicle.daf.xf", &marks));
+        // Not the game's buses: the tablet fitted in one takes WestPlay over from its own screen (owner 2026-11-13),
+        // nor any truck.
+        for id in [
+            "vehicle.scania.touring_23",
+            "man.lions_24",
+            "vehicle.volvo.9700_23",
+            "vehicle.scania.s_2016",
+            "vehicle.man.tgx_2020",
+            "vehicle.volvo.fh_2021",
+        ] {
+            assert!(!westplay_shared::vehicle_marked(id, &marks), "{id}");
+        }
         let hanging = |trucks: &[&str]| trucks.iter().map(|truck| Spot::new(truck, Slot::Hanging)).collect::<Vec<_>>();
         assert_eq!(mod_trucks, hanging(&["daf.xf", "hw.actros_l", "jasper.daf_2021"]));
         // Their vehicles left out where the accessories are written too, whatever list they come in by.
@@ -1219,16 +1234,16 @@ mod tests {
             files(&hanging(&[&first, &second, "daf.xf", "setradt531"]), &BTreeMap::new(), "/s.tobj", HEIGHT).unwrap();
         let written: Vec<&String> =
             given.iter().map(|(path, _)| path).filter(|path| path.starts_with("def/vehicle/truck/")).collect();
-        assert_eq!(written, ["def/vehicle/truck/daf.xf/accessory/toyhang/westplay_tablet.sii"]);
+        assert_eq!(
+            written,
+            [
+                "def/vehicle/truck/daf.xf/accessory/toyhang/westplay_tablet.sii",
+                "def/vehicle/truck/setradt531/accessory/toyhang/westplay_tablet.sii"
+            ]
+        );
         // Built with them: the game's and the mods', each once; read back from the mod's file.
         let files = GameFiles::new(vec![Mount::Folder(game)]);
-        let (bytes, built) = crate::game_mod::build(
-            &files,
-            &mod_trucks,
-            &GameFiles::new(Vec::new()),
-            &crate::cab_mark::Marks::default(),
-        )
-        .unwrap();
+        let (bytes, built) = crate::game_mod::build(&files, &mod_trucks, &crate::cab_mark::Marks::default()).unwrap();
         assert!(built.patched.contains(&westplay_shared::TABLET));
         let built_at = root.join("westplay.scs");
         std::fs::write(&built_at, bytes).unwrap();

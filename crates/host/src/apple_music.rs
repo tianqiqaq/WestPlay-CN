@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::signin::{self, Confirming, Progress, SignInWindow};
-use crate::speakers::{self, BassManagement, CabinCharacter, CabinReflection, Equalizer, Head, Reverb, Speaker};
+use crate::speakers::{self, Cabin, Equalizer, Head, Limiter, Speaker};
 use crate::webview::{self, OffscreenWebView, Stage};
 
 /// Apple Music's web player.
@@ -112,6 +112,8 @@ impl Command {
 enum Cab {
     Speakers {
         speakers: Option<Vec<Speaker>>,
+        /// The cab they play in, as a room (none: the page's own default).
+        cabin: Option<Cabin>,
     },
     Head {
         #[serde(flatten)]
@@ -125,10 +127,16 @@ enum Cab {
     Equalizer {
         #[serde(flatten)]
         equalizer: Equalizer,
-        reverb: Reverb,
-        character: CabinCharacter,
-        reflection: CabinReflection,
-        bass: BassManagement,
+    },
+    /// The room's early and late levels, set on their own (0 to 200 per cent each).
+    Reflections {
+        early: u8,
+        late: u8,
+    },
+    /// The low band's own limiter (200 Hz and under alone).
+    Limiter {
+        #[serde(flatten)]
+        limiter: Limiter,
     },
     /// The music's spectrum wanted (the cab's Equalizer open) or not: the page says it as it plays.
     Spectrum {
@@ -143,9 +151,11 @@ struct Told {
     speakers: Option<Option<Vec<Speaker>>>,
     head: Option<Head>,
     camera: Option<(bool, f32)>,
-    equalizer: Option<(Equalizer, Reverb, CabinCharacter, CabinReflection, BassManagement)>,
+    equalizer: Option<Equalizer>,
+    limiter: Option<Limiter>,
+    reflections: Option<(u8, u8)>,
     spectrum: Option<bool>,
-    messages: [Option<String>; 5],
+    messages: [Option<String>; 7],
 }
 
 /// What the Music app asks Apple Music.
@@ -164,6 +174,12 @@ pub enum Question {
     },
     Search {
         query: String,
+        /// The page of the results (the search's own pages of them): the first when none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page: Option<u32>,
+        /// One of the results' groups (a search's songs, artists, albums, playlists): all of them when none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<String>,
     },
     /// An album's or playlist's page.
     Collection {
@@ -171,6 +187,9 @@ pub enum Question {
     },
     Artist {
         id: String,
+        /// The page of its songs (the site's, thirty at a time): the first when none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page: Option<u32>,
     },
     /// A list of the Library: sorted by `sort` (one of the sorts it said it has), a folder's (playlists), the
     /// sorts' names in `language` (the cab's: `en`, `tr`).
@@ -187,6 +206,10 @@ pub enum Question {
     Lyrics {
         id: String,
     },
+    /// QQ Music's API key, read from its own skills page (signed in).
+    Key,
+    /// QQ Music's daily 30, from its skills API.
+    Daily,
 }
 
 impl Question {
@@ -354,6 +377,17 @@ pub struct Collection {
     pub tracks: Vec<Track>,
 }
 
+/// QQ Music's daily 30: its card and songs, or what went wrong (`apiKey`: the key, `api`: the service).
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct Daily {
+    #[serde(default)]
+    pub item: Option<Item>,
+    #[serde(default)]
+    pub tracks: Vec<Track>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// An artist's page: their top songs, then their albums and more.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ArtistPage {
@@ -362,6 +396,9 @@ pub struct ArtistPage {
     pub top: Vec<Track>,
     #[serde(default)]
     pub sections: Vec<Section>,
+    /// Its albums, where the service answers them on its own.
+    #[serde(default)]
+    pub albums: Vec<Item>,
 }
 
 /// A search's results.
@@ -428,6 +465,10 @@ pub struct Answer {
     pub library: Option<LibraryShelf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lyrics: Option<crate::lyrics::Lyrics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily: Option<Daily>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub failed: bool,
 }
@@ -616,14 +657,13 @@ impl AppleMusic {
     pub fn cab(
         &self,
         speakers: Option<&[Speaker]>,
+        cabin: Option<Cabin>,
         head: Head,
         outside: bool,
         distance: f32,
         equalizer: Equalizer,
-        reverb: Reverb,
-        character: CabinCharacter,
-        reflection: CabinReflection,
-        bass: BassManagement,
+        limiter: Limiter,
+        reflections: (u8, u8),
         spectrum: bool,
     ) -> windows::core::Result<()> {
         let mut told = self.told.borrow_mut();
@@ -637,7 +677,7 @@ impl AppleMusic {
         if told.speakers.as_ref().map(Option::as_deref) != Some(speakers) {
             let speakers = speakers.map(<[_]>::to_vec);
             told.speakers = Some(speakers.clone());
-            let message = serde_json::to_string(&Cab::Speakers { speakers }).unwrap_or_default();
+            let message = serde_json::to_string(&Cab::Speakers { speakers, cabin }).unwrap_or_default();
             told.messages[0] = Some(message.clone());
             self.view.post_json(&message)?;
         }
@@ -648,11 +688,23 @@ impl AppleMusic {
             told.messages[2] = Some(message.clone());
             self.view.post_json(&message)?;
         }
-        if told.equalizer != Some((equalizer, reverb, character, reflection, bass)) {
-            told.equalizer = Some((equalizer, reverb, character, reflection, bass));
-            let message = serde_json::to_string(&Cab::Equalizer { equalizer, reverb, character, reflection, bass })
-                .unwrap_or_default();
+        if told.equalizer != Some(equalizer) {
+            told.equalizer = Some(equalizer);
+            let message = serde_json::to_string(&Cab::Equalizer { equalizer }).unwrap_or_default();
             told.messages[3] = Some(message.clone());
+            self.view.post_json(&message)?;
+        }
+        if told.limiter != Some(limiter) {
+            told.limiter = Some(limiter);
+            let message = serde_json::to_string(&Cab::Limiter { limiter }).unwrap_or_default();
+            told.messages[6] = Some(message.clone());
+            self.view.post_json(&message)?;
+        }
+        if told.reflections != Some(reflections) {
+            told.reflections = Some(reflections);
+            let message = serde_json::to_string(&Cab::Reflections { early: reflections.0, late: reflections.1 })
+                .unwrap_or_default();
+            told.messages[5] = Some(message.clone());
             self.view.post_json(&message)?;
         }
         if told.spectrum != Some(spectrum) {
@@ -895,7 +947,10 @@ mod tests {
 
     #[test]
     fn passes_the_page_its_commands_as_the_app_sent_them() {
-        let ask = Command::Ask { id: 9, question: Question::Search { query: "tarkan".into() } };
+        let ask = Command::Ask {
+            id: 9,
+            question: Question::Search { query: "tarkan".into(), page: None, group: None },
+        };
         assert_eq!(
             serde_json::to_string(&ask).unwrap(),
             r#"{"action":"ask","id":9,"question":{"ask":"search","query":"tarkan"}}"#
@@ -1027,14 +1082,13 @@ mod tests {
         music
             .cab(
                 speakers::in_truck("scania.s_2016"),
+                None,
                 head,
                 false,
                 0.0,
                 Equalizer::default(),
-                Reverb::default(),
-                CabinCharacter::Full,
-                CabinReflection::default(),
-                BassManagement::default(),
+                Limiter::default(),
+                (40, 20),
                 false,
             )
             .unwrap();
@@ -1080,13 +1134,16 @@ mod tests {
             r#"{"action":"head","x":0.0,"y":0.3,"z":0.1,"heading":0.0,"pitch":0.0}"#
         );
         assert_eq!(
-            serde_json::to_string(&Cab::Speakers { speakers: None }).unwrap(),
-            r#"{"action":"speakers","speakers":null}"#
+            serde_json::to_string(&Cab::Speakers { speakers: None, cabin: None }).unwrap(),
+            r#"{"action":"speakers","speakers":null,"cabin":null}"#
         );
         assert!(
-            serde_json::to_string(&Cab::Speakers { speakers: speakers::in_truck("scania.s_2016").map(<[_]>::to_vec) })
-                .unwrap()
-                .starts_with(r#"{"action":"speakers","speakers":[{"#)
+            serde_json::to_string(&Cab::Speakers {
+                speakers: speakers::in_truck("scania.s_2016").map(<[_]>::to_vec),
+                cabin: None,
+            })
+            .unwrap()
+            .starts_with(r#"{"action":"speakers","speakers":[{"#)
         );
         assert_eq!(
             serde_json::to_string(&Cab::Outside { on: true, distance: 6.25 }).unwrap(),
@@ -1339,7 +1396,9 @@ mod tests {
             .and_then(|answer| answer.library)
             .expect("the Library's songs");
         let search =
-            ask(2, Question::Search { query: "tarkan".into() }).and_then(|answer| answer.search).expect("a search");
+            ask(2, Question::Search { query: "tarkan".into(), page: None, group: None })
+                .and_then(|answer| answer.search)
+                .expect("a search");
         let ids: Vec<String> =
             library.songs.iter().take(3).chain(search.songs.iter().take(2)).map(|song| song.id.clone()).collect();
         let mut with_words = 0;

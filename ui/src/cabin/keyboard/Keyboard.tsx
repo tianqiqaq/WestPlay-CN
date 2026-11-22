@@ -1,4 +1,5 @@
 import { type CSSProperties, useEffect, useRef, useState } from 'react'
+import { useCover } from '../apps/safari/hole'
 import { useLive } from '../state/store'
 import { useText } from '../state/text'
 import { DeleteGlyph, GlobeGlyph, HideGlyph, KeysGlyph, ShiftGlyph } from './glyphs'
@@ -17,13 +18,13 @@ const REPEAT_EVERY_MS = 90
  * act at once, delete repeating while held. Driven by the pointer (the interaction key's mouse).
  *
  * The player's own keyboard types into the field too while the truck stands still (the game plugin's
- * `typing`): a chip on top says so (or that it's paused while driving), and each key it types lights up here.
+ * `typing`): a chip on top says so (or that it's paused while driving). Its keys show no bubble here (owner
+ * 2026-11-09: the bubble only for keys pressed on the screen).
  */
 export function Keyboard() {
   const field = useKeyboard((state) => state.field)
   const keys = useKeyboard((state) => state.keys)
   const physical = useKeyboard((state) => state.physical)
-  const flash = useKeyboard((state) => state.flash)
   const moving = useLive((state) => (state.telemetry ? Math.abs(state.telemetry.speed) * 3.6 > 1 : false))
   const text = useText()
   // The return key keeps its name while the keyboard goes away.
@@ -34,6 +35,9 @@ export function Keyboard() {
   const [held, setHeld] = useState<string | null>(null)
   // The pointer went down on the keyboard and is still down: it may slide from key to key.
   const down = useRef(false)
+  // Over a web page shown through the cab (Safari's), drawn over it and the mouse its (apps/safari/hole.ts).
+  const panel = useRef<HTMLDivElement>(null)
+  useCover(panel, field !== null)
   const repeat = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const stopRepeat = () => clearTimeout(repeat.current)
   useEffect(() => {
@@ -65,11 +69,6 @@ export function Keyboard() {
     again(REPEAT_AFTER_MS)
   }
 
-  // The key the player's own keyboard last typed, if it shows (in either case; space for a space).
-  const flashed = (key: Key) =>
-    flash !== null &&
-    ((key.kind === 'char' && (key.char === flash.char || capital(key.char, keys.language) === flash.char)) ||
-      (key.kind === 'space' && flash.char === ' '))
   const chip =
     physical === 'typing'
       ? text.keyboard.typingWithKeyboard
@@ -79,11 +78,19 @@ export function Keyboard() {
           : text.keyboard.selectToType
         : null
 
-  const rows = keyRows(keys.language, keys.layer, keys.own !== 'en')
+  // The globe key shows wherever there's another keyboard to go to: always, as English and Chinese are both
+  // there (a Chinese PC starts on pinyin, its globe going to English, and an English one the other way).
+  const rows = keyRows(keys.language, keys.layer, keys.keyboards.length > 1)
   // Keys are as wide as the top row's: the rest of the rows centre under it.
   const style = { '--across': rows[0].length } as CSSProperties
   return (
-    <div className={`keyboard ${keys.layer}${field ? ' shown' : ''}`} style={style} aria-hidden={!field} inert={!field}>
+    <div
+      ref={panel}
+      className={`keyboard glass ${keys.layer}${field ? ' shown' : ''}`}
+      style={style}
+      aria-hidden={!field}
+      inert={!field}
+    >
       {chip && (
         <div className={physical === 'typing' ? 'keyboard-chip typing' : 'keyboard-chip'} role="status">
           <KeysGlyph />
@@ -135,21 +142,11 @@ export function Keyboard() {
                     />
                   </span>
                 )}
-                {flash && flashed(key) && (
-                  // Remade for every key typed, so its light (and bubble) plays again.
-                  <span key={flash.id} className="key-flash" aria-hidden>
-                    {key.kind === 'char' && (
-                      <span className="key-bubble">
-                        <KeyFace face={key} shiftOn={flash.char !== key.char} language={keys.language} />
-                      </span>
-                    )}
-                  </span>
-                )}
                 {key.kind === 'shift' && <ShiftGlyph shift={keys.shift} />}
                 {key.kind === 'delete' && <DeleteGlyph />}
                 {key.kind === 'globe' && <GlobeGlyph />}
                 {key.kind === 'hide' && <HideGlyph />}
-                {key.kind === 'space' && text.keyboard.space}
+                {key.kind === 'space' && spaceLabel(keys.language, text)}
                 {key.kind === 'return' && text.keyboard.returnKey[returnKind]}
                 {key.kind === 'layer' && LAYER_LABELS[key.to]}
               </button>
@@ -163,6 +160,15 @@ export function Keyboard() {
 
 /** What the layer keys say: the layer they bring. */
 const LAYER_LABELS = { letters: 'ABC', numbers: '123', symbols: '#+=' } as const
+
+/**
+ * What the space key says: the keyboard's own word for it, so which keyboard is showing is told at a glance
+ * (both the Chinese and the English keyboard would otherwise say the cabin's word, as most of their letters are
+ * the same keys).
+ */
+function spaceLabel(language: Language, text: ReturnType<typeof useText>): string {
+  return language === 'zh' ? '空格' : language === 'en' ? 'space' : text.keyboard.space
+}
 
 /** A character key's face: its character, in capitals while shift is on. */
 function KeyFace({ face, shiftOn, language }: { face: Key; shiftOn: boolean; language: Language }) {

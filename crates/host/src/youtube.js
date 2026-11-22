@@ -695,7 +695,7 @@
       return
     }
     if (command.action === 'speakers') {
-      cab.speakers(command.speakers)
+      cab.speakers(command.speakers, command.cabin)
       return
     }
     if (command.action === 'outside') {
@@ -706,12 +706,20 @@
       cab.head(command)
       return
     }
+    if (command.action === 'reflections') {
+      cab.reflections(command)
+      return
+    }
+    if (command.action === 'limiter') {
+      cab.limiter(command)
+      return
+    }
     if (command.action === 'equalizer') {
       cab.equalizer(command)
       cab.reverb?.(command.reverb)
       cab.character?.(command.character)
       cab.reflection?.(command.reflection)
-      cab.bass?.(command.bass)
+      cab.bass?.(command.bassManagement)
       return
     }
     if (command.action === 'spectrum') {

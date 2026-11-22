@@ -11,10 +11,14 @@
 /* --- Widgets -------------------------------------------------------------------------------------- */
 
 /* About a third of the width, on every screen: the map keeps its share on a small one (the 7" Scania, its
-   UI scaled up), and the widgets compact themselves to fit (below). */
+   UI scaled up), and the widgets compact themselves to fit (below). Over the map's tile, which is laid out the
+   whole width (below). */
 .widgets {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
   width: 34.5%;
-  flex: none;
   display: flex;
   flex-direction: column;
   gap: var(--tile-gap, 16px);
@@ -26,15 +30,50 @@
   display: none;
 }
 
-/* Left alone (Dashboard.tsx), the map grows to the screen's edge: the column slides off to the right, its room
-   (its width and the gap before it) going with it, so the map grows into it as it goes; and back, on the same
-   curve. The column keeps its width all the while, so its widgets never lay themselves out anew. */
+/* Left alone (Dashboard.tsx), the map grows to the screen's edge: the column slides off to the right, and the map
+   grows into its room (its width and the gap before it) as it goes; and back, on the same curve. By transforms
+   alone (owner 2026-11-06: changing the map's width each frame laid the screen out and redrew the map at a new
+   size each frame, under 60 fps): the map's tile is laid out the whole width, and what shows of it is cut by its
+   window (MapView.tsx), which slides right as the column does. Its content slides against the window by half as
+   much, so the map stays centred in what shows of it, as it did while the map changed its width; the speeds
+   against it all the way, standing still. Resting with the widgets shown, the content is only as wide as what
+   shows (the map draws no more than that); just before the map grows it becomes the whole width at once, moved
+   so nothing shows a change (Dashboard.tsx: map-wide), and after it has shrunk back, the other way. The column
+   keeps its width all the while, so its widgets never lay themselves out anew. */
 .widgets {
-  transition: margin-right var(--motion-duration) var(--motion-ease);
+  transition: transform var(--motion-duration) var(--motion-ease);
 }
 
 .map-grown .widgets {
-  margin-right: calc(-34.5% - var(--tile-gap, 16px));
+  transform: translateX(calc(100% + var(--tile-gap, 16px)));
+}
+
+/* The window and its shadow, short of the column's room (percentages of their own width, the tile's). */
+.has-widgets:not(.map-grown) :is(.map-window, .map-shadow-moving) {
+  transform: translateX(calc(-34.5% - var(--tile-gap, 16px)));
+}
+
+.has-widgets:not(.map-grown) .map-still {
+  transform: translateX(calc(34.5% + var(--tile-gap, 16px)));
+}
+
+/* Resting: the content just what shows. */
+.has-widgets:not(.map-wide) .map-content {
+  left: calc(34.5% + var(--tile-gap, 16px));
+}
+
+/* About to grow, or shrinking: the whole width, centred in what shows. */
+.has-widgets.map-wide:not(.map-grown) .map-content {
+  transform: translateX(calc(17.25% + var(--tile-gap, 16px) / 2));
+}
+
+.map-moving :is(.map-window, .map-shadow-moving, .map-still, .map-content) {
+  transition: transform var(--motion-duration) var(--motion-ease);
+}
+
+/* A map WestPlay doesn't allow (MapView.tsx): only its words, beside the column (no growing). */
+.has-widgets:not(.map-grown) .map-blocked {
+  margin-right: calc(34.5% + var(--tile-gap, 16px));
 }
 
 .widget {
@@ -76,6 +115,11 @@
 
 /* Colour from content: tinted by the album art. */
 .now-playing {
+  /* A lyric line's change: transitions.dev's text states swap, its own timing and distances. */
+  --text-swap-dur: 150ms;
+  --text-swap-translate-y: 4px;
+  --text-swap-blur: 2px;
+  --text-swap-ease: ease-in-out;
   position: relative;
   overflow: hidden;
   isolation: isolate;
@@ -158,6 +202,52 @@
   opacity: 0.78;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+/* The words, in the title's place: a longer line wraps rather than cut; each change slides, blurs, and comes
+   back clear (text states swap). */
+.now-playing .np-words {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.now-playing .np-line {
+  display: block;
+  transform: translateY(0);
+  filter: blur(0);
+  opacity: 1;
+  transition:
+    transform var(--text-swap-dur) var(--text-swap-ease),
+    filter var(--text-swap-dur) var(--text-swap-ease),
+    opacity var(--text-swap-dur) var(--text-swap-ease);
+  will-change: transform, filter, opacity;
+  font-size: calc(22px * var(--text-scale, 1));
+  font-weight: 650;
+  line-height: 1.25;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.now-playing .np-line.is-exit {
+  transform: translateY(calc(var(--text-swap-translate-y) * -1));
+  filter: blur(var(--text-swap-blur));
+  opacity: 0;
+}
+
+.now-playing .np-line.is-enter-start {
+  transform: translateY(var(--text-swap-translate-y));
+  filter: blur(var(--text-swap-blur));
+  opacity: 0;
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .now-playing .np-line {
+    transition: none !important;
+  }
 }
 
 .now-playing .controls {
@@ -258,11 +348,11 @@
   color: color-mix(in srgb, var(--text) 85%, transparent);
 }
 
-/* Neutral widgets get smoky glass in dark mode, so text stays readable over bright wallpaper areas. */
+/* The widgets are CarPlay's own glass over the wallpaper, as iOS 26's Dashboard's (liquidGlass.css `lg-system`);
+   Weather and the job smoky in the dark look, so their text stays readable over a wallpaper's bright areas. */
 .appearance-dark .weather,
 .appearance-dark .job {
   --glass: rgb(16 18 24 / 0.42);
-  --glass-rim: rgb(255 255 255 / 0.22);
 }
 
 /* A narrow or short column (a small screen's, its UI scaled up): the widgets compact, so all three fit. */

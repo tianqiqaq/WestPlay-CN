@@ -24,8 +24,7 @@ export const words: Words = {
     found: 'WestPlay ha trovato il gioco su questo PC.',
     foundMany: 'Il gioco è installato in più posizioni. Scegli quella con cui giochi.',
     foundBoth: 'WestPlay ha trovato entrambi i giochi su questo PC e si installerà in tutti e due.',
-    missing:
-      'WestPlay non ha trovato il gioco. Scegli la cartella in cui è installato, quella che contiene base.scs.',
+    missing: 'WestPlay non ha trovato il gioco. Scegli la cartella in cui è installato, quella che contiene base.scs.',
     chooseAnother: 'Usa un’altra cartella…',
     chooseFolder: 'Scegli la cartella…',
     picker: 'Scegli la cartella del gioco',
@@ -114,6 +113,11 @@ export const words: Words = {
     modFailed: 'Impossibile preparare gli schermi di WestPlay dai file del gioco.',
     noPlugin: 'In questa copia di WestPlay manca il plugin. Reinstalla WestPlay.',
     noDocuments: 'Cartella Documenti non trovata.',
+  },
+  speed: {
+    title: 'Quanto in fretta creare le mappe?',
+    sub: 'Ora WestPlay si installa nel tuo gioco e crea una mappa per ciascuno dei tuoi profili. Questo impegna molto il tuo PC per un po’. Con tanta memoria e un processore potente, può usare tutto e finire prima. Se non sei sicuro, lascialo disattivato: puoi cambiarlo più tardi nella pagina Mappa.',
+    confirm: 'Ho letto questa pagina e confermo la mia scelta.',
   },
   map: {
     title: 'Preparazione della mappa…',

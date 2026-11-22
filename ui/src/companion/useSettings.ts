@@ -1,4 +1,5 @@
 import type { IconStyle } from '../shared/customize'
+import type { Equalizer } from '../shared/host'
 import { call, on } from './bridge'
 import { useCallback, useEffect, useState } from 'react'
 
@@ -30,10 +31,19 @@ export interface Settings {
   graphics: {
     gpu: string | null
   }
-  /** The cab's map: whether its buildings rise from it, and its bridges and ramps. */
+  /** The cab's sound: its Equalizer (the cab's own Settings) and which of a coach's speakers play (here, never in
+   * the cab). */
+  sound: {
+    equalizer: Equalizer
+    custom: boolean
+    coach: CoachSpeakers
+  }
+  /** The cab's map: whether its buildings rise from it, and its bridges and ramps; and whether the maps are
+   * prepared faster (every processor thread, up to 80% of the memory). */
   map: {
     buildings: boolean
     roads: boolean
+    fast: boolean
   }
   /** The screen also served in a browser (the companion's Browser Access page). */
   mirror: MirrorSettings
@@ -54,6 +64,10 @@ export const MIRROR_DEFAULT: MirrorSettings = { enabled: true, port: 35421, lan:
 
 /** The ports the mirror's page takes: above the well-known ones, up to the top. */
 export const MIRROR_PORT = { min: 1024, max: 65535 }
+
+/** Mirrors `westplay_host::settings::CoachSpeakers`: a coach plays through its driver's pair, or through every
+ * unit over the passengers' seats. */
+export type CoachSpeakers = 'driver' | 'passengers'
 
 /** Mirrors `westplay_host::settings::TruckStrip`: the truck's own strip beside WestPlay, kept or not. */
 export type TruckStrip = 'auto' | 'off'
@@ -78,11 +92,28 @@ export const DEFAULT_KEY = KEY_PRESETS.leftAlt
 /** Mirrors `westplay_host::settings::InteractionMode`. */
 export type InteractionMode = 'hold' | 'toggle'
 
-/** Mirrors `westplay_host::settings::Keybinds`: the playing music's volume up and down, and play/pause. */
-export type KeybindId = 'volumeUp' | 'volumeDown' | 'playPause'
+/** Mirrors `westplay_host::settings::Keybinds`: the playing music's volume up and down, play/pause, the
+ * track before and after, and the screen's brightness down and up. */
+export type KeybindId =
+  | 'volumeUp'
+  | 'volumeDown'
+  | 'playPause'
+  | 'previousTrack'
+  | 'nextTrack'
+  | 'brightnessDown'
+  | 'brightnessUp'
 
-/** In a row as their default keys are (1, 2, 3), as on a stereo: volume down, play/pause, volume up. */
-export const KEYBIND_IDS: KeybindId[] = ['volumeDown', 'playPause', 'volumeUp']
+/** In a row as their default keys are (1, 2, 3), as on a stereo: volume down, play/pause, volume up; the
+ * track keys as a keyboard's media row has them, before and after; then brightness down and up. */
+export const KEYBIND_IDS: KeybindId[] = [
+  'previousTrack',
+  'volumeDown',
+  'playPause',
+  'volumeUp',
+  'nextTrack',
+  'brightnessDown',
+  'brightnessUp',
+]
 
 /** Mirrors `westplay_host::settings::Binding`: a key, pressed alone or while using the screen (holding its
  * key, or toggled on). */

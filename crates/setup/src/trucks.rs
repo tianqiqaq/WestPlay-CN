@@ -18,6 +18,9 @@ use crate::profiles::Profile;
 pub enum Source {
     /// The game's own (or a DLC's): its definition, `def/vehicle/truck/<id>/data.sii`.
     Game(&'static str),
+    /// A bus of the game's (the Coaches DLC's, 2026-11-12: buses its own kind of vehicle beside trucks): its
+    /// definition, `def/vehicle/bus/<id>/data.sii`.
+    Bus(&'static str),
     /// A mod's, found by these words (all of them, in its name or file name): installed (in the game's `mod`
     /// folder or the Workshop), active in a profile or not.
     Mod(&'static [&'static str]),
@@ -90,30 +93,44 @@ pub const TRUCKS: &[Truck] = &[
         source: Source::Game("volvo.fh_2024"),
         layout: Some("volvo-fh"),
     },
-    // Oyuncuyusbis' coaches (mods), WestPlay on their own screens (owner 2026-10-24).
+    // Oyuncuyusbis' coaches (mods), WestPlay on their Gps part (owner 2026-11-16: "all four busses get them in their
+    // GPS tablet part just like Setra"), the MAN Lion's Coach's the game's portable navigator in its dashboard set.
     Truck {
         id: "travego-16-shd",
         name: "Mercedes-Benz Travego 16 SHD (Oyuncuyusbis)",
         source: Source::Mod(&["travego"]),
-        layout: Some("travego-16"),
+        layout: Some("ob-gps"),
     },
     Truck {
         id: "man-lions-coach",
         name: "MAN Lion's Coach (Oyuncuyusbis)",
         source: Source::Mod(&["lions", "coach"]),
-        layout: Some("man-lions-coach"),
+        layout: Some("ob-gps"),
     },
     Truck {
         id: "setra-s516-hd",
         name: "Setra S 516 HD/2 (Oyuncuyusbis)",
         source: Source::Mod(&["setra", "516"]),
-        layout: Some("setra-516"),
+        layout: Some("ob-gps"),
     },
     Truck {
         id: "setra-s531-dt",
         name: "Setra S 531 DT (Oyuncuyusbis)",
         source: Source::Mod(&["setra", "531"]),
-        layout: Some("setra-531"),
+        layout: Some("ob-gps"),
+    },
+    // The Coaches DLC's buses whose real ones have CarPlay, WestPlay on their own screens (owner 2026-11-12).
+    Truck {
+        id: "scania-touring",
+        name: "Scania Touring",
+        source: Source::Bus("scania.touring_23"),
+        layout: Some("scania-touring"),
+    },
+    Truck {
+        id: "man-lions-coach-2024",
+        name: "MAN Lion's Coach (2024)",
+        source: Source::Bus("man.lions_24"),
+        layout: Some("man-lions-24"),
     },
     // Any other truck, with WestPlay's tablet on its dashboard (owner 2026-10-24).
     Truck {
@@ -195,6 +212,7 @@ pub fn fit(
         .map(|truck| {
             let in_game = match truck.source {
                 Source::Game(id) => files.read(&format!("def/vehicle/truck/{id}/data.sii")).ok().flatten().is_some(),
+                Source::Bus(id) => files.read(&format!("def/vehicle/bus/{id}/data.sii")).ok().flatten().is_some(),
                 Source::Mod(words) => {
                     let has = |named: &str| {
                         let named = named.to_lowercase();
@@ -248,6 +266,25 @@ mod tests {
             })
             .collect();
         profile
+    }
+
+    #[test]
+    fn a_bus_is_found_among_the_games_buses() {
+        let root = std::env::temp_dir().join(format!("westplay-trucks-buses-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("def/vehicle/bus/scania.touring_23");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("data.sii"), "SiiNunit
+{
+}
+").unwrap();
+        let files = GameFiles::new(vec![Mount::Folder(root.clone())]);
+        let fits = fit(Kind::Ets2, &files, &["scania-touring", "man-lions-24"], &[], &[]);
+        let _ = std::fs::remove_dir_all(&root);
+        let of = |id: &str| fits.iter().find(|(truck, _)| truck.id == id).unwrap().1;
+        // The Coaches DLC's Scania Touring, among the buses (not the trucks); its MAN not in this game.
+        assert_eq!(of("scania-touring"), Fit::Ready);
+        assert_eq!(of("man-lions-coach-2024"), Fit::NotInGame);
     }
 
     #[test]

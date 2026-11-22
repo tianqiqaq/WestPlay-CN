@@ -30,5 +30,13 @@ dist/
 # AGENT
 AGENT.md
 CLAUDE.md
+
+#tools
+/tools/ats-speaker-extractor
+/tools/speaker-marker
+/.workbuddy
+.trae-html-share-packages/tools/ats-speaker-extractor/viewer/index.html.zip
+AGENTS.md
+
 # Local release override (createUpdaterArtifacts off, for builds without the signing key)
 /app/tauri.bundle.tmp.json

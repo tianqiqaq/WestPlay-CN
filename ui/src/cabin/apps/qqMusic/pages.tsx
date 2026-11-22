@@ -1,10 +1,21 @@
-import { type CSSProperties, type ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import {
+  type CSSProperties,
+  type ReactNode,
+  type UIEventHandler,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react'
 import { createPortal } from 'react-dom'
 import { TextField } from '../../keyboard/TextField'
 import { useLanguage, useText } from './text'
 import {
   addToLibrary,
+  ask,
+  type AppleMusicDaily,
   type AppleMusicItem,
+  type AppleMusicResults,
   type AppleMusicSection,
   type AppleMusicShelf,
   type AppleMusicTrack,
@@ -12,6 +23,7 @@ import {
   type LibraryLook,
   openArtist,
   openItem,
+  openSearchGroup,
   openView,
   playFrom,
   playSearchTrack,
@@ -23,6 +35,7 @@ import {
   useQqMusic,
   useAsked,
   useShownAgain,
+  type SearchGroup,
   type View,
 } from './qqMusic'
 import {
@@ -37,19 +50,27 @@ import {
   NoteGlyph,
   PlayGlyph,
   PlusGlyph,
+  RadioGlyph,
   SearchGlyph,
   ShuffleGlyph,
   StarGlyph,
 } from './glyphs'
-import { useKindLine } from './look'
-import { Cover, Explicit, Failed, Loading, Section, SongRow, Tile } from './parts'
+import { Cover, Explicit, Failed, Loading, Section, SectionHead, SongRow, Tile } from './parts'
 
 /** The Music app's pages: each tab's own (Home, New, Radio, the Library, Search), and the pages over them. */
 
 /** A page that scrolls, its large title on top (Apple's). */
-function Scroll({ title, children }: { title?: string; children: ReactNode }) {
+function Scroll({
+  title,
+  children,
+  onScroll,
+}: {
+  title?: string
+  children: ReactNode
+  onScroll?: UIEventHandler<HTMLDivElement>
+}) {
   return (
-    <div className="am-scroll">
+    <div className="am-scroll" onScroll={onScroll}>
       {title && <h1 className="am-title">{title}</h1>}
       {children}
     </div>
@@ -110,7 +131,7 @@ function Pitch({ title, text: words }: { title: string; text: string }) {
       </span>
       <div className="am-pitch-text">
         <h2>{title}</h2>
-        <p>{signingIn ? text.appleMusic.finishOnPc : words}</p>
+        {(signingIn || words) && <p>{signingIn ? text.appleMusic.finishOnPc : words}</p>}
       </div>
       <button type="button" className="am-pill key" onClick={signIn} disabled={signingIn}>
         {text.appleMusic.signIn}
@@ -119,12 +140,18 @@ function Pitch({ title, text: words }: { title: string; text: string }) {
   )
 }
 
-/** Home: asked again each time it's shown again (what was played lately changes as it's used). */
+/** Home: the daily 30 and 猜你喜欢 on top, then asked again each time it's shown again. */
 export function Home({ shown }: { shown: boolean }) {
   const text = useText()
   const account = useAccount()
-  const asked = useAsked(account === 'in' ? { ask: 'home' } : null, useShownAgain(shown))
-  const latest = useAsked(account === 'out' ? { ask: 'new' } : null)
+  const visits = useQqMusic((state) => state.visits.home)
+  const shownAgain = useShownAgain(shown)
+  // The skills API's key is read first (its page opened once, signed in), then Home and the daily 30.
+  const keyAsked = useAsked(account === 'in' ? { ask: 'key' } : null)
+  const key = keyAsked.answer
+  const ready = account === 'in' && (key !== null || keyAsked.failed)
+  const dailyAsked = useAsked(account === 'in' && key ? { ask: 'daily' } : null, visits + shownAgain)
+  const asked = useAsked(ready ? { ask: 'home' } : null, visits + shownAgain)
   const title = '首页'
   if (account === 'unknown') {
     return (
@@ -134,23 +161,114 @@ export function Home({ shown }: { shown: boolean }) {
     )
   }
   if (account === 'out') {
-    // Signed out, Home is Apple's ask to sign in, then what's new.
+    // Signed out, Home is the ask to sign in alone: nothing else is shown or asked before it.
     return (
       <Scroll title={title}>
-        <Pitch title={text.appleMusic.homePitch.title} text={text.appleMusic.homePitch.text} />
-        {latest.answer && <Sections sections={latest.answer.sections} />}
+        <Pitch title="需要登录" text="" />
       </Scroll>
     )
   }
   return (
     <Answered asked={asked} title={title}>
-      {(page) => (
-        <Scroll title={title}>
-          {page.sections.length === 0 && <p className="am-empty">{text.appleMusic.empty}</p>}
-          <Sections sections={page.sections} />
-        </Scroll>
-      )}
+      {(page) => {
+        const hero = page.sections.find((section) => section.style === 'hero')
+        const station = hero?.items[0] ?? null
+        const sections = page.sections.filter((section) => section !== hero)
+        return (
+          <Scroll title={title}>
+            <TopRow
+              daily={dailyAsked.answer}
+              station={station}
+              keyFailed={keyAsked.failed}
+              dailyFailed={dailyAsked.failed}
+              onRetry={() => {
+                if (keyAsked.failed) keyAsked.retry()
+                else if (dailyAsked.answer || dailyAsked.failed) dailyAsked.retry()
+                else asked.retry()
+              }}
+            />
+            {sections.length === 0 && <p className="am-empty">{text.appleMusic.empty}</p>}
+            <Sections sections={sections} />
+          </Scroll>
+        )
+      }}
     </Answered>
+  )
+}
+
+/** Home's first row: the daily 30 and 猜你喜欢, named above their covers (each cover whole over its own
+ * blurred picture; the daily's name leads into its playlist). */
+function TopRow({
+  daily,
+  station,
+  keyFailed,
+  dailyFailed,
+  onRetry,
+}: {
+  daily: AppleMusicDaily | null
+  station: AppleMusicItem | null
+  keyFailed: boolean
+  dailyFailed: boolean
+  onRetry(): void
+}) {
+  let dailyError: 'apiKey' | 'api' | null = null
+  if (daily?.error) dailyError = daily.error
+  else if (!daily && (dailyFailed || keyFailed)) dailyError = keyFailed ? 'apiKey' : 'api'
+  const name =
+    dailyError === 'apiKey' ? 'API Key异常' : dailyError === 'api' ? 'API异常' : (daily?.item?.name ?? '每日30首')
+  const cover = daily?.item?.image ?? null
+  const tracks = daily?.tracks ?? []
+  return (
+    <div className="am-top">
+      <div className="am-top-item">
+        <button
+          type="button"
+          className="am-top-name"
+          onClick={
+            dailyError
+              ? onRetry
+              : () => {
+                  if (daily?.item) openView({ kind: 'collection', item: daily.item })
+                }
+          }
+        >
+          {name}
+          {!dailyError && (
+            <span className="am-top-more" aria-hidden>
+              ›
+            </span>
+          )}
+        </button>
+        <div className="am-top-card">
+          {cover && <span className="am-top-blur" style={{ backgroundImage: `url(${cover})` }} />}
+          <button
+            type="button"
+            className="am-top-cover"
+            aria-label={name}
+            onClick={
+              dailyError
+                ? onRetry
+                : () => {
+                    if (daily?.item && tracks.length > 0) playFrom(daily.item, tracks, 0)
+                  }
+            }
+          >
+            {cover ? <img src={cover} alt="" draggable={false} /> : <NoteGlyph size={46} />}
+          </button>
+        </div>
+      </div>
+      <div className="am-top-item">
+        <button type="button" className="am-top-name" disabled={!station} onClick={() => station && openItem(station)}>
+          {station?.name ?? '猜你喜欢'}
+        </button>
+        <button type="button" className="am-top-card" disabled={!station} onClick={() => station && openItem(station)}>
+          {station?.image && <span className="am-top-blur" style={{ backgroundImage: `url(${station.image})` }} />}
+          <span className="am-top-cover">
+            {station?.image ? <img src={station.image} alt="" draggable={false} /> : <RadioGlyph size={46} />}
+          </span>
+        </button>
+      </div>
+    </div>
   )
 }
 
@@ -168,11 +286,12 @@ export function New({ shown }: { shown: boolean }) {
 }
 
 export function Radio({ shown }: { shown: boolean }) {
-  const asked = useAsked(shown ? { ask: 'radio' } : null)
+  const visits = useQqMusic((state) => state.visits.radio)
+  const asked = useAsked(shown ? { ask: 'radio' } : null, visits + useShownAgain(shown))
   return (
-    <Answered asked={asked} title="分类歌单">
+    <Answered asked={asked} title="为你推荐">
       {(page) => (
-        <Scroll title="分类歌单">
+        <Scroll title="为你推荐">
           <Sections sections={dedupe(page.sections)} />
         </Scroll>
       )}
@@ -313,21 +432,20 @@ export function Typing({ query, onPicked }: { query: string; onPicked(): void })
   return <Results query={asked} onPicked={onPicked} />
 }
 
+/** A search's results: its groups one under the other (songs, artists, albums, playlists), each its first
+ * results in three columns of two rows; a group's title row opens all of it. */
 function Results({ query, onPicked }: { query: string; onPicked?(): void }) {
   const text = useText()
   const asked = useAsked({ ask: 'search', query })
-  const kindLine = useKindLine()
   const words = text.appleMusic
   return (
     <Answered asked={asked}>
       {(results) => {
         const none =
-          results.top.length +
-            results.songs.length +
+          results.songs.length +
             results.artists.length +
             results.albums.length +
-            results.playlists.length +
-            results.stations.length ===
+            results.playlists.length ===
           0
         if (none) {
           return (
@@ -344,58 +462,48 @@ function Results({ query, onPicked }: { query: string; onPicked?(): void }) {
           onPicked?.()
           openItem(item)
         }
-        const shelf = (title: string, items: AppleMusicItem[]) =>
-          items.length > 0 && (
-            <section className="am-section">
-              <div className="am-section-head">
-                <h2>{title}</h2>
-              </div>
-              <div className="am-shelf">
-                {items.map((item) => (
-                  <PickedTile key={item.id} item={item} onPick={pick} />
-                ))}
-              </div>
-            </section>
-          )
+        const group = (title: string, kind: SearchGroup, children: ReactNode) => (
+          <section className="am-section am-search-group">
+            <SectionHead title={title} onAll={() => openSearchGroup(query, kind)} />
+            <div className="am-shelf">{children}</div>
+          </section>
+        )
         return (
           <Scroll>
-            {results.top.length > 0 && (
-              <section className="am-section">
-                <div className="am-section-head">
-                  <h2>{words.topResults}</h2>
-                </div>
-                <div className="am-shelf am-top-results">
-                  {results.top.map((item) => (
-                    <button key={item.id} type="button" className="am-top-result" onClick={() => pick(item)}>
-                      <Cover item={item} />
-                      <span className="am-song-text">
-                        <span className="am-song-name">
-                          {item.name}
-                          {item.explicit && <Explicit />}
-                        </span>
-                        <span className="am-song-by">{kindLine(item)}</span>
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </section>
-            )}
-            {results.songs.length > 0 && (
-              <section className="am-section">
-                <div className="am-section-head">
-                  <h2>{words.songs}</h2>
-                </div>
-                <div className="am-shelf am-song-columns">
-                  {results.songs.slice(0, 12).map((track, i) => (
-                    <SongRow key={`${track.id}:${i}`} track={track} cover onPlay={() => playSearchTrack(track)} />
-                  ))}
-                </div>
-              </section>
-            )}
-            {shelf(words.artists, results.artists)}
-            {shelf(words.albums, results.albums)}
-            {shelf(words.playlists, results.playlists)}
-            {shelf(words.stations, results.stations)}
+            {results.songs.length > 0 &&
+              group(
+                words.songs,
+                'songs',
+                results.songs
+                  .slice(0, 6)
+                  .map((track) => (
+                    <SongRow key={track.id} track={track} cover onPlay={() => playSearchTrack(track)} />
+                  )),
+              )}
+            {results.artists.length > 0 &&
+              group(
+                words.artists,
+                'artists',
+                results.artists
+                  .slice(0, 6)
+                  .map((item) => <SearchItem key={item.id} item={item} onPick={pick} />),
+              )}
+            {results.albums.length > 0 &&
+              group(
+                words.albums,
+                'albums',
+                results.albums
+                  .slice(0, 6)
+                  .map((item) => <SearchItem key={item.id} item={item} onPick={pick} />),
+              )}
+            {results.playlists.length > 0 &&
+              group(
+                words.playlists,
+                'playlists',
+                results.playlists
+                  .slice(0, 6)
+                  .map((item) => <SearchItem key={item.id} item={item} onPick={pick} />),
+              )}
           </Scroll>
         )
       }}
@@ -403,17 +511,145 @@ function Results({ query, onPicked }: { query: string; onPicked?(): void }) {
   )
 }
 
-/** A search's card: remembered as searched once picked. */
-function PickedTile({ item, onPick }: { item: AppleMusicItem; onPick(item: AppleMusicItem): void }) {
+/** One of a search's groups: every result it has, one a row; scrolled to the bottom, the site's next page. */
+function SearchGroupPage({ query, group }: { query: string; group: SearchGroup }) {
+  const text = useText()
+  const words = text.appleMusic
+  const titles: Record<SearchGroup, string> = {
+    songs: words.songs,
+    artists: words.artists,
+    albums: words.albums,
+    playlists: words.playlists,
+  }
+  const title = titles[group]
+  const [songs, setSongs] = useState<AppleMusicTrack[]>([])
+  const [items, setItems] = useState<AppleMusicItem[]>([])
+  const [failed, setFailed] = useState(false)
+  const [done, setDone] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const page = useRef(0)
+  const busy = useRef(false)
+  /** The rows this page has shown: a page that brings none new is the last (the site may repeat one). */
+  const seen = useRef(new Set<string>())
+  /** The last page whose answer was taken (an answer to a page already taken, as the first one asked twice, is
+   * the same rows again: not the last page). */
+  const applied = useRef(0)
+
+  const listOf = (answer: AppleMusicResults) =>
+    group === 'songs' ? answer.songs : group === 'artists' ? answer.artists : group === 'albums' ? answer.albums : answer.playlists
+  const fill = (answer: AppleMusicResults, next: number) => {
+    if (next <= applied.current) return
+    applied.current = next
+    const list = listOf(answer)
+    const fresh = list.filter((each) => !seen.current.has(each.id))
+    for (const each of fresh) seen.current.add(each.id)
+    if (group === 'songs') setSongs((was) => [...was, ...(fresh as AppleMusicTrack[])])
+    else setItems((was) => [...was, ...(fresh as AppleMusicItem[])])
+    setDone(list.length === 0 || (next > 1 && fresh.length === 0))
+  }
+  const load = (next: number) => {
+    if (busy.current) return
+    busy.current = true
+    setLoading(true)
+    ask({ ask: 'search', query, page: next, group }).then(
+      (answer) => {
+        page.current = next
+        fill(answer, next)
+        setLoading(false)
+        busy.current = false
+      },
+      () => {
+        setLoading(false)
+        busy.current = false
+        setFailed(true)
+      },
+    )
+  }
+
+  useEffect(() => {
+    page.current = 0
+    busy.current = false
+    seen.current = new Set()
+    applied.current = 0
+    setSongs([])
+    setItems([])
+    setFailed(false)
+    setDone(false)
+    setLoading(false)
+    // The results page asked for the first page already: its answer is this group's first page too.
+    ask({ ask: 'search', query }).then(
+      (answer) => {
+        page.current = 1
+        fill(answer, 1)
+      },
+      () => setFailed(true),
+    )
+    // The query and the group stand for the page.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, group])
+
+  const onScroll: UIEventHandler<HTMLDivElement> = (event) => {
+    const list = event.currentTarget
+    if (!done && !failed && list.scrollHeight - list.scrollTop - list.clientHeight < 240) load(page.current + 1)
+  }
+  if (failed && page.current === 0) {
+    return (
+      <Scroll title={title}>
+        <Failed
+          onRetry={() => {
+            setFailed(false)
+            load(1)
+          }}
+        />
+      </Scroll>
+    )
+  }
+  if (page.current === 0) {
+    return (
+      <Scroll title={title}>
+        <Loading />
+      </Scroll>
+    )
+  }
   return (
-    <button
-      type="button"
-      className={item.kind === 'artist' ? 'am-tile artist' : 'am-tile'}
-      onClick={() => onPick(item)}
-    >
-      <Cover item={item} />
-      <span className="am-tile-name">{item.name}</span>
-      {item.kind !== 'artist' && item.by && <span className="am-tile-by">{item.by}</span>}
+    <Scroll title={title} onScroll={onScroll}>
+      {group === 'songs' ? (
+        <div className="am-songs">
+          {songs.map((track) => (
+            <SongRow key={track.id} track={track} cover onPlay={() => playSearchTrack(track)} />
+          ))}
+        </div>
+      ) : (
+        <div className="am-songs">
+          {items.map((item) => (
+            <SearchItem key={item.id} item={item} onPick={(picked) => openItem(picked)} />
+          ))}
+        </div>
+      )}
+      {loading && <Loading />}
+      {failed && !loading && (
+        <Failed
+          onRetry={() => {
+            setFailed(false)
+            load(page.current + 1)
+          }}
+        />
+      )}
+    </Scroll>
+  )
+}
+
+/** A search's artist, album or playlist as a row: its cover, its name and who it's by. */
+function SearchItem({ item, onPick }: { item: AppleMusicItem; onPick(item: AppleMusicItem): void }) {
+  return (
+    <button type="button" className="am-song" onClick={() => onPick(item)}>
+      <span className="am-song-cover">
+        <Cover item={item} />
+      </span>
+      <span className="am-song-text">
+        <span className="am-song-name">{item.name}</span>
+        {item.by && <span className="am-song-by">{item.by}</span>}
+      </span>
     </button>
   )
 }
@@ -422,24 +658,28 @@ function PickedTile({ item, onPick }: { item: AppleMusicItem; onPick(item: Apple
 export function Page({ view, shown }: { view: View; shown: boolean }) {
   switch (view.kind) {
     case 'collection':
-      return <CollectionPage item={view.item} />
+      return <CollectionPage item={view.item} visible={shown} nonce={view.id} />
     case 'artist':
       return <ArtistPage item={view.item} />
     case 'curator':
       return <CuratorPage item={view.item} />
     case 'results':
       return <Results query={view.query} />
+    case 'searchGroup':
+      return <SearchGroupPage query={view.query} group={view.group} />
     case 'library':
-      return <LibraryShelfPage shelf={view.shelf} folder={view.folder} shown={shown} />
+      return <LibraryShelfPage shelf={view.shelf} folder={view.folder} shown={shown} nonce={view.id} />
     case 'section':
       return <SectionPage section={view.section} />
   }
 }
 
-/** An album's or playlist's page: the cover beside its name, who it's by, Play and Shuffle; its songs under. */
-function CollectionPage({ item }: { item: AppleMusicItem }) {
+/** An album's or playlist's page: the cover beside its name, who it's by, Play and Shuffle; its songs under.
+ * Asked afresh each time it is opened (`nonce`) or shown again: a song liked since (or one taken out of a
+ * playlist) is in its list the next time. */
+function CollectionPage({ item, visible, nonce }: { item: AppleMusicItem; visible: boolean; nonce: number }) {
   const text = useText()
-  const asked = useAsked({ ask: 'collection', id: item.id })
+  const asked = useAsked({ ask: 'collection', id: item.id }, nonce + useShownAgain(visible))
   const page = asked.answer
   const shown = page?.item ?? item
   const tracks = page?.tracks ?? []
@@ -548,43 +788,115 @@ function AddButton({ id }: { id: string }) {
   )
 }
 
-/** An artist's page: their picture across the top, their name on it and Play; their top songs, then their
- * albums and more. */
+/** An artist's page: their picture across the top, their name on it and Play; their songs, albums and their
+ * own words under it, a tab each; the songs' next page comes as the list's bottom is reached. */
 function ArtistPage({ item }: { item: AppleMusicItem }) {
   const text = useText()
   const asked = useAsked({ ask: 'artist', id: item.id })
   const page = asked.answer
   const shown = page?.item ?? item
   const picture = shown.wide ?? shown.image
+  const words = text.appleMusic
+  // Its groups, one showing under the tabs: its songs, its albums, its own words (QQ Music's page).
+  const [tab, setTab] = useState<'songs' | 'albums' | 'bio'>('songs')
+  const groups: { id: typeof tab; label: string }[] = [
+    { id: 'songs', label: words.songs },
+    { id: 'albums', label: words.albums },
+  ]
+  if (shown.note) groups.push({ id: 'bio', label: words.bio ?? 'Bio' })
+  const albums = page?.albums ?? []
+  // The songs so far and the page the site's next one is (a page brings thirty).
+  const [songs, setSongs] = useState<AppleMusicTrack[]>([])
+  const [more, setMore] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const last = useRef(0)
+  const busy = useRef(false)
+  const seen = useRef(new Set<string>())
+
+  useEffect(() => {
+    if (!page) return
+    setSongs(page.top)
+    seen.current = new Set(page.top.map((track) => track.id))
+    last.current = 1
+    setMore(page.top.length >= 30)
+  }, [page])
+
+  const load = (next: number) => {
+    if (busy.current) return
+    busy.current = true
+    setLoading(true)
+    ask({ ask: 'artist', id: item.id, page: next }).then(
+      (answer) => {
+        const fresh = answer.top.filter((track) => !seen.current.has(track.id))
+        for (const track of fresh) seen.current.add(track.id)
+        setSongs((was) => [...was, ...fresh])
+        last.current = next
+        // A page that brings none new is the last (the site may repeat one).
+        setMore(answer.top.length >= 30 && fresh.length > 0)
+        setLoading(false)
+        busy.current = false
+      },
+      () => {
+        setLoading(false)
+        busy.current = false
+        setMore(false)
+      },
+    )
+  }
+  const onScroll: UIEventHandler<HTMLDivElement> = (event) => {
+    if (tab !== 'songs' || !more) return
+    const list = event.currentTarget
+    if (list.scrollHeight - list.scrollTop - list.clientHeight < 240) load(last.current + 1)
+  }
   return (
-    <div className="am-scroll am-artist" style={{ '--cover': shown.color } as CSSProperties}>
+    <div className="am-scroll am-artist" style={{ '--cover': shown.color } as CSSProperties} onScroll={onScroll}>
       <header className="am-artist-head">
         {picture && <img src={picture} alt="" draggable={false} />}
         <div className="am-artist-name">
           <button
             type="button"
             className="am-play-round"
-            aria-label={text.appleMusic.play}
-            disabled={!page || page.top.length === 0}
-            onClick={() => page && playFrom(shown, page.top, null, false)}
+            aria-label={words.play}
+            disabled={songs.length === 0}
+            onClick={() => songs.length > 0 && playFrom(shown, songs, null, false)}
           >
             <PlayGlyph size={34} />
           </button>
           <h1>{shown.name}</h1>
         </div>
       </header>
+      <nav className="am-artist-tabs">
+        {groups.map((group) => (
+          <button
+            key={group.id}
+            type="button"
+            className={tab === group.id ? 'on' : undefined}
+            onClick={() => setTab(group.id)}
+          >
+            {group.label}
+          </button>
+        ))}
+      </nav>
       {asked.failed && <Failed onRetry={asked.retry} />}
       {!page && !asked.failed && <Loading />}
-      {page && (
+      {page && tab === 'songs' && (
         <>
-          {page.top.length > 0 && (
-            <Section section={{ title: text.appleMusic.topSongs, style: 'songs', items: [], songs: page.top }} />
-          )}
-          {page.sections.map((section, i) => (
-            <Section key={`${section.title}:${i}`} section={section} />
-          ))}
+          <div className="am-songs">
+            {songs.map((track, i) => (
+              <SongRow key={track.id} track={track} cover onPlay={() => playFrom(shown, songs, i)} />
+            ))}
+          </div>
+          {loading && <Loading />}
         </>
       )}
+      {page && tab === 'albums' && (
+        <div className="am-grid">
+          {albums.map((album) => (
+            <Tile key={album.id} item={album} />
+          ))}
+        </div>
+      )}
+      {page && tab === 'bio' && <p className="am-artist-bio">{shown.note}</p>}
     </div>
   )
 }
@@ -648,14 +960,17 @@ function LibraryShelfPage({
   shelf,
   folder,
   shown,
+  nonce,
 }: {
   shelf: AppleMusicShelf
   folder?: AppleMusicItem
   shown: boolean
+  nonce: number
 }) {
   const text = useText()
   const language = useLanguage()
   const look = useQqMusic((state) => state.libraryLooks[shelf])
+  const visits = useQqMusic((state) => state.visits.library)
   const asked = useAsked(
     {
       ask: 'library',
@@ -665,7 +980,7 @@ function LibraryShelfPage({
       // These pages' own UI is English or Turkish (a Chinese game gets English there, as YouTube Music does).
       language: language === 'tr' ? 'tr' : 'en',
     },
-    useShownAgain(shown),
+    visits + nonce + useShownAgain(shown),
   )
   // A new sort shows the list as it was until the sorted one comes.
   const [kept, setKept] = useState(asked.answer)

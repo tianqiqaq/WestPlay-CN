@@ -677,6 +677,13 @@
   background: var(--fill);
 }
 
+/* Greyed out: nothing to choose here now (the coach speakers in a truck). */
+.ob-group[data-disabled],
+.ob-group-title[data-disabled],
+.ob-note[data-disabled] {
+  opacity: 0.35;
+}
+
 .ob-group-title {
   margin: 4px 0 -6px 14px;
   font-size: 12px;
@@ -738,6 +745,11 @@ button.ob-row:active {
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* A row whose title is a sentence to read whole (a box to tick): it wraps. */
+.ob-row[data-wrap] .ob-row-text b {
+  white-space: normal;
 }
 
 .ob-row-text span {
@@ -855,6 +867,34 @@ button.ob-row:active {
 }
 
 /* ---------- iOS's switch and slider ---------- */
+
+/* A box to tick: a ring, blue with a white tick once on. */
+.ob-check {
+  display: grid;
+  flex-shrink: 0;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 2px solid rgb(120 120 128 / 0.6);
+  border-radius: 99px;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+  transition:
+    background 200ms ease,
+    border-color 200ms ease;
+}
+
+.ob-check[data-on] {
+  border-color: var(--blue);
+  background: var(--blue);
+}
+
+.ob-check svg {
+  width: 16px;
+  height: 16px;
+}
 
 .ob-switch {
   position: relative;

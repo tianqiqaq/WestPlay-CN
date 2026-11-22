@@ -95,6 +95,7 @@ unsafe fn init(version: u32, params: *const TelemetryInitParamsV100) -> i32 {
         let status = match d3d::install().and_then(|()| hooks::enable_all()) {
             Ok(()) => {
                 log!("hooks enabled");
+                d3d::note_present_code();
                 "hooks installed".to_string()
             }
             Err(e) => {
@@ -139,6 +140,7 @@ unsafe fn shutdown() {
         bridge.plugin.game.store(0, std::sync::atomic::Ordering::Release);
         bridge.plugin.screen_frame.store(0, std::sync::atomic::Ordering::Release);
         bridge.plugin.cab_frame.store(0, std::sync::atomic::Ordering::Release);
+        bridge.plugin.parking_frame.store(0, std::sync::atomic::Ordering::Release);
         bridge.plugin.truck_supported.store(0, std::sync::atomic::Ordering::Release);
         bridge.plugin.screen_layout.store(0, std::sync::atomic::Ordering::Release);
         bridge.plugin.pointer.active.store(0, std::sync::atomic::Ordering::Release);

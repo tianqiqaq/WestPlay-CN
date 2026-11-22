@@ -24,8 +24,7 @@ export const words: Words = {
     found: 'WestPlay a trouvé le jeu sur ce PC.',
     foundMany: 'Le jeu est installé à plusieurs endroits. Choisissez celui avec lequel vous jouez.',
     foundBoth: 'WestPlay a trouvé les deux jeux sur ce PC et s’installera dans chacun.',
-    missing:
-      'WestPlay n’a pas trouvé le jeu. Choisissez son dossier d’installation, celui qui contient base.scs.',
+    missing: 'WestPlay n’a pas trouvé le jeu. Choisissez son dossier d’installation, celui qui contient base.scs.',
     chooseAnother: 'Choisir un autre dossier…',
     chooseFolder: 'Choisir le dossier…',
     picker: 'Choisissez le dossier du jeu',
@@ -114,6 +113,11 @@ export const words: Words = {
     modFailed: 'Les écrans de WestPlay n’ont pas pu être préparés à partir des fichiers du jeu.',
     noPlugin: 'Le plug-in manque dans cette copie de WestPlay. Réinstallez WestPlay.',
     noDocuments: 'Le dossier Documents est introuvable.',
+  },
+  speed: {
+    title: 'À quelle vitesse créer vos cartes ?',
+    sub: 'Ensuite, WestPlay s’installe dans votre jeu et crée une carte pour chacun de vos profils. Cela sollicite fortement votre PC pendant un moment. Avec beaucoup de mémoire et un processeur puissant, il peut tout utiliser et finir plus tôt. Dans le doute, laissez-le désactivé : vous pourrez le changer plus tard sur la page Carte.',
+    confirm: 'J’ai lu cette page et je confirme mon choix.',
   },
   map: {
     title: 'Préparation de la carte…',

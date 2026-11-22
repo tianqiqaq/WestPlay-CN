@@ -14,7 +14,8 @@ import type { Settings } from './useSettings'
  *   found, ETS2 alone set up (as one who had WestPlay before ATS was supported).
  * - `?game=off|on|live|unsupported`: the game not running, running (the cab not on the screen), the screen live, or
  *   the player in a truck WestPlay doesn't show in.
- * - `?map=building|ready|waiting|failed`: the map's state (`building` runs to `ready`).
+ * - `?map=building|ready|waiting|stopped|memory|failed`: the map's state (`building` runs to `ready`; `stopped`: its
+ *   preparation ended by the game starting).
  * - `?update`: an update found (its sheet offers it; installing it downloads, then stays installing).
  * - `?custom`: some wallpapers and an icon set of the player's (adding gives more, with a file left out).
  * - `?leftOut`: the played profile's map made without a map mod it couldn't read.
@@ -76,14 +77,23 @@ const UPDATE: Offer | null = query.has('update')
 let settings: Settings = {
   interaction: { key: 0xa4, mode: 'hold', sensitivity: 1.4 },
   keybinds: {
+    previousTrack: { key: 0xb1, withInteractionKey: false },
     volumeDown: { key: 0x31, withInteractionKey: true },
     playPause: { key: 0x32, withInteractionKey: true },
     volumeUp: { key: 0x33, withInteractionKey: true },
+    nextTrack: { key: 0xb0, withInteractionKey: false },
+    brightnessDown: { key: 0x34, withInteractionKey: true },
+    brightnessUp: { key: 0x35, withInteractionKey: true },
   },
   screen: { truckStrip: 'auto' },
   look: { wallpaper: null, iconSet: null, iconStyle: 'auto' },
   graphics: { gpu: null },
-  map: { buildings: true, roads: true },
+  sound: {
+    equalizer: { bass: 0, mid: 0, treble: 0, advanced: false, bands: Array.from({ length: 15 }, () => 0) },
+    custom: false,
+    coach: 'driver',
+  },
+  map: { buildings: true, roads: true, fast: false },
   mirror: { enabled: mirrorState !== 'off', port: 35421, lan: true },
   language: null,
 }
@@ -119,6 +129,8 @@ function startingMap(): MapStatus {
       return { state: 'building', done: 0.05, stage: 'reading' }
     case 'waiting':
       return { state: 'waitingForGame' }
+    case 'stopped':
+      return { state: 'waitingForGame', stopped: true }
     case 'memory':
       return { state: 'waitingForMemory', needed: 3_500_000_000, free: 2_140_000_000 }
     case 'failed':
@@ -164,6 +176,8 @@ function status(): HostStatus {
     screenDrawing: live,
     // `?game=unsupported`: in a truck WestPlay doesn't show in.
     truckSupported: gameState === 'unsupported' ? false : live ? true : null,
+    // `?coach=26`: in a coach whose passengers' set plays through 26 speakers.
+    coachSpeakers: live && query.has('coach') ? Number(query.get('coach')) : null,
     gameElevated: gameState !== 'off' && query.has('elevated'),
     westplayOpen: live ? westplayOpen : null,
     youtubeSignedIn: accounts.youtube,
@@ -184,13 +198,21 @@ function status(): HostStatus {
       {
         game: 'ets2',
         dir: 'profiles/57657374',
+        folder: 'europe-cbf29ce484222325',
         status: map,
         leftOut: map.state === 'ready' && query.has('leftOut') ? ['Crni Kal 1.61'] : undefined,
       },
       {
         game: 'ets2',
         dir: 'profiles/54657374',
-        status: map.state === 'ready' ? { state: 'building', done: 0.4, stage: 'drawing' } : { state: 'queued' },
+        folder: 'europe-6350e2ab6a0e4959',
+        // `?others=ready`: made too (Prepare Maps Again then offers both to pick from).
+        status:
+          map.state === 'ready'
+            ? query.get('others') === 'ready'
+              ? map
+              : { state: 'building', done: 0.4, stage: 'drawing' }
+            : { state: 'queued' },
       },
     ],
     mirror,
@@ -268,6 +290,8 @@ const CHECK: GameCheck = {
     { id: 'renault-t-2024', name: 'Renault T (2024)', fit: 'ready', fromMod: false },
     { id: 'volvo-fh-2021', name: 'Volvo FH (2021)', fit: 'ready', fromMod: false },
     { id: 'volvo-fh-2024', name: 'Volvo FH (2024)', fit: 'ready', fromMod: false },
+    { id: 'scania-touring', name: 'Scania Touring', fit: 'ready', fromMod: false },
+    { id: 'man-lions-coach-2024', name: "MAN Lion's Coach (2024)", fit: 'ready', fromMod: false },
     { id: 'any-truck-tablet', name: 'Any truck – with the WestPlay tablet', fit: 'ready', fromMod: false },
   ],
   modProblem: null,
@@ -356,6 +380,7 @@ export function answer(command: string, args?: Record<string, unknown>): Promise
       westplayOpen = Boolean(args?.open)
       return later(undefined, 200)
     case 'prepare_maps_again':
+      console.info('prepare_maps_again', args)
       // The played profile's map made anew (the status's ticking carries it on).
       map = { state: 'building', done: 0, stage: 'reading' }
       return later(undefined, 300)

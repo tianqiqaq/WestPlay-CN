@@ -1,4 +1,4 @@
-import { type CSSProperties, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { type CSSProperties, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { type SignedIn, useAskOnce, useSignedIn } from './accounts'
 import { appVersion, call, PREVIEW_TUTORIAL } from './bridge'
 import { Onboarding } from './onboarding/Onboarding'
@@ -20,6 +20,8 @@ import { Support } from './pages/Support'
 import { LanguageSheet } from './pages/LanguageSheet'
 import { UninstallSheet } from './pages/UninstallSheet'
 import { FinishUpdate, UpdateSheet } from './pages/UpdateSheet'
+import { GameStoppedSheet } from './pages/GameStoppedSheet'
+import { useGameStopped } from './gameStopped'
 import { type CompanionWords, companionWords, type SectionId } from './pages/words'
 import { RoomText, n, WordsContext } from './room/room'
 import './room/room.css'
@@ -53,8 +55,16 @@ export function Companion() {
       .catch((e: unknown) => setSetupError(String(e)))
   }, [])
   useShowWhenReady(setup !== null || setupError !== null)
+  // Over the onboarding or the room, whichever is up: a map's preparation stopped by the game starting.
+  const [gameStopped, closeGameStopped] = useGameStopped(status)
 
   if (!setup) return <div className="cp-blank">{setupError ?? ''}</div>
+  const over = gameStopped && (
+    <GameStoppedSheet
+      cw={companionWords(chosenLanguage(settings.settings?.language, setup.language))}
+      close={closeGameStopped}
+    />
+  )
   if (!setup.finished && !tutorial) {
     // The onboarding set the game up: what's set up is read again (the companion read it before), then its
     // tutorial.
@@ -63,7 +73,7 @@ export function Companion() {
         .then(setSetup, () => {})
         .finally(() => setTutorial(start))
     }
-    return <Onboarding initial={setup} status={status} settings={settings} onFinished={onboarded} />
+    return <Onboarding initial={setup} status={status} settings={settings} onFinished={onboarded} over={over} />
   }
   return (
     <Room
@@ -76,6 +86,7 @@ export function Companion() {
         setTutorial(null)
         setupState().then(setSetup, () => setSetup({ ...setup, finished: true }))
       }}
+      over={over}
     />
   )
 }
@@ -121,6 +132,7 @@ function Room({
   settings,
   tutorial = null,
   tutorialDone,
+  over,
 }: {
   setup: SetupState
   /** What's set up read again (a game installed into from the Setup page). */
@@ -130,6 +142,8 @@ function Room({
   /** The tutorial, from where it starts; `null`: the companion. */
   tutorial?: 'lesson' | 'launch' | null
   tutorialDone?: () => void
+  /** A sheet over everything (`GameStoppedSheet`). */
+  over?: ReactNode
 }) {
   const code = chosenLanguage(settings.settings?.language, setup.language)
   const words = wordsFor(code)
@@ -366,6 +380,7 @@ function Room({
               <UpdateSheet cw={cw} offer={update} close={() => setUpdateShown(false)} />
             )}
             {phase === 'room' && <FinishUpdate cw={cw} setup={setup} />}
+            {over}
           </ScreenContext.Provider>
         </RoomText.Provider>
       </WordsContext.Provider>

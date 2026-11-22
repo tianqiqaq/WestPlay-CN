@@ -53,8 +53,9 @@ use crate::world::RoadClass;
 pub const FOLDER: &str = "raised";
 /// The zoom of the files' tiles: a couple of kilometres across.
 pub(super) const FILE_ZOOM: u8 = 14;
-/// A road's faces are about this long: it's the top of it that counts (0.2 m off on the tightest of ramps).
-const FACE_STEP: f64 = 8.0;
+/// A raised road's faces in its files are about this long: it's the top of it that counts (0.2 m off on the tightest of
+/// ramps). (What passes over what is found with shorter ones: [`super::roads::FACE_STEP`].)
+const RAISED_FACE_STEP: f64 = 8.0;
 /// How steeply a road's drawn height falls at the least, going away from what's in the air, of the way along: the steepest
 /// of the game's own ramps (8% and over: 6 km of the 485 km coming off what's in the air in Europe).
 const EASE: f32 = 0.08;
@@ -89,6 +90,8 @@ const UNDER_CELL: f64 = 16.0;
 const UNDER_STEP: f32 = 2.0;
 /// How far under a road what's under it stops, m: at the road's own height the two would fight for the same pixels.
 const UNDER_ROAD: f32 = 0.2;
+/// The points of a building's ground tried in a cell of [`UNDER_CELL`], every [`UNDER_STEP`] each way.
+const CELL_POINTS: f64 = (UNDER_CELL / UNDER_STEP as f64) * (UNDER_CELL / UNDER_STEP as f64);
 
 type Cell = (i32, i32);
 
@@ -251,7 +254,12 @@ impl<'a> Joints<'a> {
                 .chunks(nodes.len().div_ceil(threads).max(1))
                 .map(|nodes| scope.spawn(move || nodes.iter().map(|&node| (node, self.rise_through(node, bridges, tunnels))).collect::<Vec<_>>()))
                 .collect();
-            working.into_iter().flat_map(|thread| thread.join().unwrap_or_default()).collect()
+            // A chunk whose thread panicked ends the build with its panic: dropped, every rise in it was gone without a
+            // word (the review of 2026-11-11, minor 11).
+            let joined = |thread: std::thread::ScopedJoinHandle<'_, Vec<(u64, f32)>>| {
+                thread.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            };
+            working.into_iter().flat_map(joined).collect()
         });
         let mut rises: HashMap<u64, f32> = found.into_iter().filter(|&(_, rise)| rise > 0.0).collect();
         // A way into a tunnel gets there on the ground.
@@ -440,26 +448,78 @@ impl Decks {
         for &[x, z] in ring {
             (x0, x1, z0, z1) = (x0.min(x), x1.max(x), z0.min(z), z1.max(z));
         }
+        // Its ground is tried every [`UNDER_STEP`] across it, unless that's more points than the decks of the whole map
+        // have: then only in the decks' cells, at the same points. A map can stretch a model past all measure (PL
+        // Rebuilding 3.0.1 has ProMods' village houses 130,000 times as long, 1,744 km): walked, its 85 billion points
+        // kept the build at 98% for ever (players' "stuck at 99%", 2026-11-13).
+        let steps = |from: f32, to: f32| ((f64::from(to) - f64::from(from)) / f64::from(UNDER_STEP)).max(0.0);
+        let points = steps(x0, x1) * steps(z0, z1);
+        if points <= self.cells.len() as f64 * CELL_POINTS {
+            self.over_walked(ring, ground, [x0, x1, z0, z1])
+        } else {
+            self.over_where_decks_are(ring, ground, [x0, x1, z0, z1])
+        }
+    }
+
+    /// [`Self::over`], every point of `ring`'s box (`x0, x1, z0, z1`) tried.
+    fn over_walked(&self, ring: &[Point], ground: f32, [x0, x1, z0, z1]: [f32; 4]) -> Option<f32> {
         let mut lowest = None;
         let mut x = x0 + UNDER_STEP / 2.0;
         while x < x1 {
             let mut z = z0 + UNDER_STEP / 2.0;
             while z < z1 {
-                let cell = ((f64::from(x) / UNDER_CELL).floor() as i32, (f64::from(z) / UNDER_CELL).floor() as i32);
-                if let Some(list) = self.cells.get(&cell)
-                    && contains(ring, [x, z])
-                {
-                    for [y, drawn] in list.iter().filter_map(|&deck| on_deck(&self.decks[deck as usize], x, z)) {
-                        if f64::from(ground - y) < levels::CLEAR {
-                            lowest = Some(lowest.map_or(drawn - UNDER_ROAD, |low: f32| low.min(drawn - UNDER_ROAD)));
-                        }
-                    }
-                }
+                self.under_at(ring, ground, x, z, &mut lowest);
                 z += UNDER_STEP;
             }
             x += UNDER_STEP;
         }
         lowest
+    }
+
+    /// [`Self::over`], only the points of `ring`'s box (`x0, x1, z0, z1`) in a cell with decks tried: those its walk
+    /// would try there.
+    fn over_where_decks_are(&self, ring: &[Point], ground: f32, [x0, x1, z0, z1]: [f32; 4]) -> Option<f32> {
+        let step = f64::from(UNDER_STEP);
+        // The walk's points along one axis (from `from + step / 2`, below `to`) inside the cell from `edge`.
+        let points = |from: f32, to: f32, edge: f64| {
+            let start = f64::from(from) + step / 2.0;
+            let first = ((edge - start) / step).ceil().max(0.0);
+            let last = ((edge + UNDER_CELL - start) / step).ceil() - 1.0;
+            (first as u64..=last.max(-1.0) as u64)
+                .map(move |i| (start + i as f64 * step) as f32)
+                .filter(move |&at| at < to && f64::from(at) >= edge && f64::from(at) < edge + UNDER_CELL)
+        };
+        let mut lowest = None;
+        for &(col, row) in self.cells.keys() {
+            let (left, near) = (f64::from(col) * UNDER_CELL, f64::from(row) * UNDER_CELL);
+            if left + UNDER_CELL <= f64::from(x0) || left >= f64::from(x1) {
+                continue;
+            }
+            if near + UNDER_CELL <= f64::from(z0) || near >= f64::from(z1) {
+                continue;
+            }
+            for x in points(x0, x1, left) {
+                for z in points(z0, z1, near) {
+                    self.under_at(ring, ground, x, z, &mut lowest);
+                }
+            }
+        }
+        lowest
+    }
+
+    /// At (x, z) of `ring`, standing at `ground`: `lowest` lowered to how high a road over it is drawn, less
+    /// [`UNDER_ROAD`].
+    fn under_at(&self, ring: &[Point], ground: f32, x: f32, z: f32, lowest: &mut Option<f32>) {
+        let cell = ((f64::from(x) / UNDER_CELL).floor() as i32, (f64::from(z) / UNDER_CELL).floor() as i32);
+        if let Some(list) = self.cells.get(&cell)
+            && contains(ring, [x, z])
+        {
+            for [y, drawn] in list.iter().filter_map(|&deck| on_deck(&self.decks[deck as usize], x, z)) {
+                if f64::from(ground - y) < levels::CLEAR {
+                    *lowest = Some(lowest.map_or(drawn - UNDER_ROAD, |low: f32| low.min(drawn - UNDER_ROAD)));
+                }
+            }
+        }
     }
 }
 
@@ -572,7 +632,11 @@ fn meshes(tile: (u32, u32), faces: &[Face], lows: &[[f32; 3]]) -> Vec<((u32, u32
         let corners = [0, 1, 2].map(|i| mesh.vertex(face.t[i], heights[i], *kind, 0));
         mesh.triangles.push(((heights[0] + heights[1] + heights[2]) / 3.0, corners));
     }
-    for &(count, index, from) in edges.values() {
+    // In the faces' order, not the edges' map's (its own each run): the triangles of a height go into the file in this
+    // order, and the files are the same from one build to the next.
+    let mut sides: Vec<(u32, usize, usize)> = edges.into_values().collect();
+    sides.sort_unstable_by_key(|&(_, index, from)| (index, from));
+    for (count, index, from) in sides {
         let (face, heights, kind) = &shown[index];
         let to = (from + 1) % 3;
         let (a, b) = (face.t[from], face.t[to]);
@@ -675,7 +739,7 @@ fn in_the_air(scene: &Scene, tile: (u32, u32), items: &[u32]) -> Found {
         }
         scene.add_prefab_ground(item as usize, &mut ground);
         let mut part = Vec::new();
-        scene.add_faces(item as usize, FACE_STEP, &mut part);
+        scene.add_faces(item as usize, RAISED_FACE_STEP, &mut part);
         roads.extend(part.iter().copied().filter(|face| Mesh::kind(face.kind).is_some()));
         ground.extend(part.into_iter().filter(|face| face.kind == Kind::Quiet));
         shown.push(item);
@@ -692,8 +756,9 @@ fn in_the_air(scene: &Scene, tile: (u32, u32), items: &[u32]) -> Found {
             }
         };
         if matches!(scene.map.items[index].data, ItemData::Road { .. }) {
-            let wide = scene.stations(index, FACE_STEP, OUT_OVER_WATER);
-            for ((at, sides), (_, wide)) in scene.stations(index, FACE_STEP, BESIDE).into_iter().zip(wide).filter(|((at, _), _)| inside(at[0], at[2])) {
+            let wide = scene.stations(index, RAISED_FACE_STEP, OUT_OVER_WATER);
+            let stations = scene.stations(index, RAISED_FACE_STEP, BESIDE).into_iter().zip(wide);
+            for ((at, sides), (_, wide)) in stations.filter(|((at, _), _)| inside(at[0], at[2])) {
                 over_roads(at, &mut bridge);
                 bridge.extend(in_the_air_at(at, sides, &on_ground, &on_surfaces));
                 if let [Some(a), Some(b)] = wide.map(|side| water_beside(at, side, &on_ground, &on_water)) {
@@ -703,7 +768,7 @@ fn in_the_air(scene: &Scene, tile: (u32, u32), items: &[u32]) -> Found {
             }
         } else {
             let mut part = Vec::new();
-            scene.add_faces(index, FACE_STEP, &mut part);
+            scene.add_faces(index, RAISED_FACE_STEP, &mut part);
             for [a, b, c] in part.iter().filter(|face| Mesh::kind(face.kind).is_some()).map(|face| face.t) {
                 let middle = [0, 1, 2].map(|k| (a[k] + b[k] + c[k]) / 3.0);
                 if inside(middle[0], middle[2]) {
@@ -729,8 +794,11 @@ pub(super) struct Heights {
     tunnels: HashSet<u32>,
 }
 
+/// Each block's roads in the air, by its tile.
+type BlockDecks = Mutex<Vec<((u32, u32), Vec<Deck>)>>;
+
 /// The files of the block `tile`, of its `items`, and the roads of it in the air as drawn, into `decks`.
-fn block(scene: &Scene, heights: &Heights, tile: (u32, u32), items: &[u32], decks: &Mutex<Vec<Deck>>) -> Vec<((u32, u32), Vec<u8>)> {
+fn block(scene: &Scene, heights: &Heights, tile: (u32, u32), items: &[u32], decks: &BlockDecks) -> Vec<((u32, u32), Vec<u8>)> {
     let Heights { stands, raised, air, tunnels } = heights;
     let over = |item: &u32| raised.contains(item) || air.contains_key(item);
     if !items.iter().any(over) {
@@ -740,7 +808,7 @@ fn block(scene: &Scene, heights: &Heights, tile: (u32, u32), items: &[u32], deck
     let (mut faces, mut lows, mut found) = (Vec::new(), Vec::new(), Vec::new());
     for &item in items.iter().filter(|item| !tunnels.contains(item)) {
         let mut part = Vec::new();
-        scene.add_faces(item as usize, FACE_STEP, &mut part);
+        scene.add_faces(item as usize, RAISED_FACE_STEP, &mut part);
         part.retain(|face| Mesh::kind(face.kind).is_some());
         // The height of what stays on the flat map isn't anybody's.
         let nodes: Vec<([f64; 2], [f64; 2], f32)> = if raised.contains(&item) {
@@ -764,30 +832,48 @@ fn block(scene: &Scene, heights: &Heights, tile: (u32, u32), items: &[u32], deck
         }
         faces.append(&mut part);
     }
-    decks.lock().unwrap_or_else(|e| e.into_inner()).append(&mut found);
+    decks.lock().unwrap_or_else(|e| e.into_inner()).push((tile, found));
     meshes(tile, &faces, &lows)
 }
 
-/// `work` for each of `blocks`, on `threads`, saying how far it's got.
-fn each_block(blocks: &[((u32, u32), Vec<u32>)], threads: usize, stop: &AtomicBool, progress: &mut dyn FnMut(f32), work: &(dyn Fn((u32, u32), &[u32]) + Sync)) {
+/// What's done for a block ([`each_block`]): by its tile, with its items.
+type BlockWork<'a> = dyn Fn((u32, u32), &[u32]) + Sync + 'a;
+
+/// `work` for each of `blocks`, on `threads`, saying how far it's got (by their items: a city's block takes many times a
+/// field's).
+fn each_block(
+    blocks: &[((u32, u32), Vec<u32>)],
+    threads: usize,
+    stop: &AtomicBool,
+    progress: &mut dyn FnMut(f32),
+    work: &BlockWork<'_>,
+) {
     let next = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
+    let all_items = blocks.iter().map(|(_, items)| items.len()).sum::<usize>().max(1);
+    let items_done = AtomicUsize::new(0);
     let budget = super::Budget::of(blocks);
+    let working = AtomicUsize::new(threads);
     std::thread::scope(|scope| {
         for _ in 0..threads {
             scope.spawn(|| {
-                while let Some((tile, items)) = blocks.get(next.fetch_add(1, Ordering::Relaxed)) {
+                let _leaving = crate::threads::Leaving(&working);
+                loop {
+                    let turn = next.fetch_add(1, Ordering::Relaxed);
+                    let Some((tile, items)) = blocks.get(turn) else { break };
+                    // Its turn taken first: the blocks after it wait for it ([`super::Budget`]).
+                    let _room = budget.take(turn, items.len(), stop);
                     if stop.load(Ordering::Relaxed) {
                         break;
                     }
-                    let _room = budget.take(items.len(), stop);
                     work(*tile, items);
                     done.fetch_add(1, Ordering::Relaxed);
+                    items_done.fetch_add(items.len(), Ordering::Relaxed);
                 }
             });
         }
-        while done.load(Ordering::Relaxed) < blocks.len() && !stop.load(Ordering::Relaxed) {
-            progress(done.load(Ordering::Relaxed) as f32 / blocks.len() as f32);
+        while crate::threads::any_working(&working) && done.load(Ordering::Relaxed) < blocks.len() && !stop.load(Ordering::Relaxed) {
+            progress(items_done.load(Ordering::Relaxed) as f32 / all_items as f32);
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
     });
@@ -836,8 +922,15 @@ pub(super) fn write(scene: &Scene, heights: &Heights, blocks: &[((u32, u32), Vec
     let written: Mutex<(Vec<(u32, u32)>, u64)> = Mutex::new((Vec::new(), 0));
     let failure: Mutex<Option<std::io::Error>> = Mutex::new(None);
     let dir = dir.join(FOLDER);
-    let decks: Mutex<Vec<Deck>> = Mutex::new(Vec::new());
+    // Each block's by its tile (by when it was drawn they'd come in the threads' order: the first of two decks as low
+    // under a point is the one taken).
+    let decks: BlockDecks = Mutex::new(Vec::new());
     each_block(blocks, threads, stop, progress, &|tile, items| {
+        // A block that couldn't be written: the rest aren't made (the first error the answer: the review of
+        // 2026-11-11, minor 2).
+        if failure.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+            return;
+        }
         for (tile, bytes) in block(scene, heights, tile, items, &decks) {
             let folder = dir.join(tile.0.to_string());
             let put = gzipped(&bytes).and_then(|bytes| {
@@ -851,7 +944,9 @@ pub(super) fn write(scene: &Scene, heights: &Heights, blocks: &[((u32, u32), Vec
                     written.0.push(tile);
                     written.1 += size as u64;
                 }
-                Err(error) => *failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(error),
+                Err(error) => {
+                    failure.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert(error);
+                }
             }
         }
     });
@@ -862,16 +957,29 @@ pub(super) fn write(scene: &Scene, heights: &Heights, blocks: &[((u32, u32), Vec
     list.sort_unstable();
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join("index.json"), serde_json::to_vec(&list).map_err(std::io::Error::other)?)?;
-    Ok((list.len(), bytes, Decks::new(decks.into_inner().unwrap_or_else(|e| e.into_inner()))))
+    let mut decks = decks.into_inner().unwrap_or_else(|e| e.into_inner());
+    decks.sort_unstable_by_key(|&(tile, _)| tile);
+    Ok((list.len(), bytes, Decks::new(decks.into_iter().flat_map(|(_, decks)| decks).collect())))
 }
 
 /// Marks in the files under `dir` what's over water (`water`: by a place on the ground, x and z).
-pub fn mark_water(dir: &Path, water: &dyn Fn(f32, f32) -> bool) -> std::io::Result<()> {
+///
+/// Each tile's file on the build's threads, telling `progress` how far it is (0 to 1); `false` if `stop` was set
+/// first (one tile at a time, never stopping: the review of 2026-11-11, minor 7).
+pub fn mark_water(
+    dir: &Path,
+    water: &(dyn Fn(f32, f32) -> bool + Sync),
+    stop: &AtomicBool,
+    progress: &mut dyn FnMut(f32),
+) -> std::io::Result<bool> {
     let dir = dir.join(FOLDER);
     let list: Vec<(u32, u32)> = serde_json::from_slice(&std::fs::read(dir.join("index.json"))?).map_err(std::io::Error::other)?;
     let units = |vertex: &[u8], at: usize| f64::from(u16::from_le_bytes([vertex[at], vertex[at + 1]])) / 65535.0 * (1.0 + 2.0 * PAST) - PAST;
     let tiles = f64::from(1u32 << FILE_ZOOM);
-    for (x, y) in list {
+    let mark = |&(x, y): &(u32, u32)| -> std::io::Result<()> {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         let path = dir.join(x.to_string()).join(format!("{y}.bin"));
         let mut bytes = gunzipped(&std::fs::read(&path)?)?;
         let mut marked = false;
@@ -888,13 +996,30 @@ pub fn mark_water(dir: &Path, water: &dyn Fn(f32, f32) -> bool) -> std::io::Resu
         if marked {
             std::fs::write(&path, gzipped(&bytes)?)?;
         }
-    }
-    Ok(())
+        Ok(())
+    };
+    crate::threads::in_order_telling(&list, 8, mark, progress).into_iter().collect::<std::io::Result<()>>()?;
+    Ok(!stop.load(Ordering::Relaxed))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_block_that_panics_ends_the_work_never_leaves_it_waiting() {
+        // On a thread of its own, so a wait for ever fails the test rather than hanging it.
+        let (sent, got) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let blocks: Vec<((u32, u32), Vec<u32>)> = (0..20).map(|i| ((i, 0), vec![i])).collect();
+            let stop = AtomicBool::new(false);
+            let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                each_block(&blocks, 4, &stop, &mut |_| {}, &|tile, _| assert_ne!(tile.0, 7, "block 7 can't be drawn"));
+            }));
+            let _ = sent.send(ended.is_err());
+        });
+        assert_eq!(got.recv_timeout(std::time::Duration::from_secs(30)), Ok(true), "the work ended with the block's panic");
+    }
 
     /// A straight strip of road along `x` from `from` to `to` at height `y(x)`, 8 m wide round `z`.
     fn along_x(from: f64, to: f64, z: f64, y: impl Fn(f64) -> f64) -> Vec<Face> {
@@ -1070,6 +1195,45 @@ mod tests {
     }
 
     #[test]
+    fn a_building_stretched_past_all_measure_is_looked_under_only_where_the_roads_are() {
+        // The road of the test above, drawn from 10 m to 14 m.
+        let corner = |x: f32, z: f32| [x, z, 30.0, 10.0 + (x / 5.0).max(0.0)];
+        let decks = Decks::new(vec![
+            [corner(0.0, -5.0), corner(20.0, -5.0), corner(20.0, 5.0)],
+            [corner(0.0, -5.0), corner(20.0, 5.0), corner(0.0, 5.0)],
+        ]);
+        let rect = |x0: f32, x1: f32, z0: f32, z1: f32| vec![[x0, z0], [x1, z0], [x1, z1], [x0, z1]];
+        // PL Rebuilding's: a house 1,744 km by 196 km over it, answered at once, the road over it found.
+        let huge = rect(-872_000.0, 872_000.0, -98_000.0, 98_000.0);
+        let started = std::time::Instant::now();
+        let top = decks.over(&huge, 0.0).unwrap();
+        assert!(started.elapsed().as_secs_f32() < 1.0, "{:?}", started.elapsed());
+        assert!((top - 9.8).abs() < 0.3, "{top}");
+        // As large as a number goes, or past it: answered too, at once (what's inside such an outline can't be told,
+        // the arithmetic of it overflowing: never a building's).
+        let started = std::time::Instant::now();
+        let _ = decks.over(&rect(f32::MIN, f32::MAX, -10.0, 10.0), 0.0);
+        assert_eq!(decks.over(&rect(-f32::INFINITY, f32::INFINITY, 100.0, 120.0), 0.0), None);
+        assert!(started.elapsed().as_secs_f32() < 1.0, "{:?}", started.elapsed());
+        // Both ways of looking find the same under buildings of any size and place, the road's edges too.
+        let rings = [
+            rect(7.0, 13.0, -3.0, 3.0),
+            rect(-30.0, 50.0, -40.0, 40.0),
+            rect(18.5, 25.0, 4.0, 9.0),
+            rect(-5.0, 1.0, 4.9, 30.0),
+        ];
+        for ring in rings {
+            let [mut x0, mut x1, mut z0, mut z1] = [f32::MAX, f32::MIN, f32::MAX, f32::MIN];
+            for &[x, z] in &ring {
+                (x0, x1, z0, z1) = (x0.min(x), x1.max(x), z0.min(z), z1.max(z));
+            }
+            let walked = decks.over_walked(&ring, 0.0, [x0, x1, z0, z1]);
+            assert_eq!(decks.over_where_decks_are(&ring, 0.0, [x0, x1, z0, z1]), walked, "{ring:?}");
+            assert_eq!(decks.over(&ring, 0.0), walked, "{ring:?}");
+        }
+    }
+
+    #[test]
     fn a_bridge_s_model_comes_down_with_its_road() {
         // A level road 54 m up in the game, on the flat map, and a pier beside it, standing in the valley.
         let corner = |x: f32, z: f32| [x, z, 54.0, 0.0];
@@ -1105,14 +1269,17 @@ mod tests {
             .chunks(Mesh::VERTEX * 3)
             .map(|t| [0, 1, 2].map(|i| u16::from_le_bytes([t[i * Mesh::VERTEX + 4], t[i * Mesh::VERTEX + 5]])).iter().copied().max().unwrap())
             .collect();
-        assert!(heights.iter().any(|&height| height == 700));
+        assert!(heights.contains(&700));
         let flags: HashSet<u8> = bytes[8 + 4 * BUCKETS..].chunks(Mesh::VERTEX).map(|v| v[9]).collect();
         assert_eq!(flags, HashSet::from([0, ON_SIDE, ON_SIDE | BOTTOM]));
     }
 
+    /// Marked over water where it is; stopped first, nothing marked and `false`. (Its folder let go however the test
+    /// ends: the review of 2026-11-11, tests.)
     #[test]
     fn what_rises_over_water_is_marked_as_being_over_it() {
-        let dir = std::env::temp_dir().join(format!("westplay-raised-{}", std::process::id()));
+        let temp = crate::test_dir::TempDir::new();
+        let dir = temp.path.clone();
         let mut faces = along_x(-600.0, 600.0, 0.0, |_| 0.0);
         faces.extend(along_x(-600.0, 600.0, 40.0, |_| 7.0));
         let tile = tile::tile_of(0.0, 40.0, FILE_ZOOM);
@@ -1120,9 +1287,12 @@ mod tests {
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(folder.join(format!("{}.bin", tile[1])), gzipped(&file(&faces, (0.0, 40.0))).unwrap()).unwrap();
         std::fs::write(dir.join(FOLDER).join("index.json"), serde_json::to_vec(&[(tile[0], tile[1])]).unwrap()).unwrap();
-        mark_water(&dir, &|x, _| x > 50.0).unwrap();
-        let bytes = gunzipped(&std::fs::read(folder.join(format!("{}.bin", tile[1]))).unwrap()).unwrap();
-        std::fs::remove_dir_all(&dir).unwrap();
+        let read = || gunzipped(&std::fs::read(folder.join(format!("{}.bin", tile[1]))).unwrap()).unwrap();
+        let before = read();
+        assert!(!mark_water(&dir, &|x, _| x > 50.0, &AtomicBool::new(true), &mut |_| {}).unwrap());
+        assert_eq!(read(), before, "stopped: nothing marked");
+        assert!(mark_water(&dir, &|x, _| x > 50.0, &AtomicBool::new(false), &mut |_| {}).unwrap());
+        let bytes = read();
         let triangles: Vec<&[u8]> = bytes[8 + 4 * BUCKETS..].chunks(3 * Mesh::VERTEX).collect();
         assert!(triangles.iter().any(|t| t[9] & OVER_WATER != 0));
         assert!(triangles.iter().any(|t| t[9] & OVER_WATER == 0));

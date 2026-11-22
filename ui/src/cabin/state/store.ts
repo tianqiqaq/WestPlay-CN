@@ -2,13 +2,6 @@ import { create } from 'zustand'
 import { createJSONStorage, persist } from 'zustand/middleware'
 import {
   type Equalizer,
-  type CabinCharacter,
-  type BassManagement,
-  type CabinReflection,
-  DEFAULT_BASS_MANAGEMENT,
-  DEFAULT_CABIN_CHARACTER,
-  DEFAULT_CABIN_REFLECTION,
-  DEFAULT_REVERB,
   FLAT,
   type HostMessage,
   type GameWeather,
@@ -16,17 +9,15 @@ import {
   type JobInfo,
   IS_DEMO,
   type KeybindAction,
-  type Reverb,
   isInHost,
   postToHost,
   subscribeHostMessages,
   type Telemetry,
   toEqualizer,
-  toReverb,
-  toCabinCharacter,
-  toBassManagement,
-  toCabinReflection,
+  type Limiter,
   type TruckInfo,
+  DEFAULT_LIMITER,
+  toLimiter,
 } from '../../shared/host'
 import type { Maneuver, TurnKind } from '../maps/guidance'
 import {
@@ -45,12 +36,26 @@ import {
   useNeteaseMusic,
 } from '../apps/neteaseMusic/neteaseMusic'
 import {
+  receivePlayback as receiveRadioPlayback,
+  receiveStations as receiveRadioStations,
+} from '../apps/radio/radio'
+import {
   receiveAnswer as receiveSpotifyAnswer,
   receivePlayback,
   receiveState as receiveSpotifyState,
 } from '../apps/spotify/spotify'
 import { receiveAnswer, receiveState, useYouTube } from '../apps/youtube/youtube'
 import { receiveFolder, receivePlayback as receivePlayerPlayback } from '../apps/player/player'
+import {
+  receiveClosed as receiveSafariClosed,
+  receiveDialog as receiveSafariDialog,
+  receiveLetGo as receiveSafariLetGo,
+  receiveNoDownload as receiveSafariNoDownload,
+  receiveOpened as receiveSafariOpened,
+  receivePicture as receiveSafariPicture,
+  receivePlaying as receiveSafariPlaying,
+  receiveTab as receiveSafariTab,
+} from '../apps/safari/safari'
 import {
   receiveAnswer as receiveYouTubeMusicAnswer,
   receivePlayback as receiveYouTubeMusicPlayback,
@@ -102,6 +107,9 @@ interface CabinState {
   hours24: boolean
   /** The apps' text size, a step of `TEXT_SIZES` (Settings › Appearance › Text Size). */
   textSize: number
+  /** Every glass surface flat and solid, nothing behind it showing through (Settings › Appearance, as iOS's
+   * Accessibility one; owner 2026-11-16: "make the sidebar and any liquid glass element flat"). */
+  reduceTransparency: boolean
   /** The truck's own strip: kept (`auto`) or not, as set in the companion window (the host sends it). */
   oemMode: OemMode
   /** Whether the map's buildings rise from it, as set in the companion window (the host sends it). */
@@ -112,12 +120,9 @@ interface CabinState {
    * (Recommended, flat): kept with WestPlay's settings, the host sends them. */
   equalizer: Equalizer
   equalizerCustom: boolean
-  /** The cab's shared reverb (Settings › Sound › Cabin Reverb), kept with WestPlay's settings. */
-  reverb: Reverb
-  /** The amount of cabin modelling used (Settings › Sound › Cabin Character). */
-  cabinCharacter: CabinCharacter
-  reflection: CabinReflection
-  bass: BassManagement
+  /** The low band's own limiter (Settings › Sound › Low Limiter), 200 Hz and under alone. Kept with WestPlay's
+   * settings, the host plays it. */
+  limiter: Limiter
   /** The cab's EQ switch (Settings › Sound's first row): off, every player plays its speakers as they're placed
    * and shapes nothing. Kept with WestPlay's settings, the host tells the players. */
   soundEnabled: boolean
@@ -125,6 +130,9 @@ interface CabinState {
   preset: string | null
   /** The presets offered, tuned in WestPlay's developer window (its own file each): none until one is made. */
   presets: Preset[]
+  /** The screen's brightness (Settings › Appearance): the slider's place, 0 to 1, full at 1. The host scales the
+   * light of everything on the screen by it. */
+  brightness: number
   power: PowerState
   /**
    * The screen is handed back to the truck (its stock screen shows, with WestPlay's button to come back),
@@ -139,6 +147,7 @@ interface CabinState {
   setMapGrows(on: boolean): void
   setHours24(on: boolean): void
   setTextSize(step: number): void
+  setReduceTransparency(on: boolean): void
   /** One band of the curve, set in Settings › Equalizer (choosing Custom): played by every player, and kept with
    * WestPlay's settings. */
   setEqualizerBand(band: keyof Equalizer, db: number): void
@@ -150,16 +159,14 @@ interface CabinState {
   chooseEqualizer(custom: boolean): void
   /** The curve flat again. */
   resetEqualizer(): void
-  /** Changes the cab's reverb; every field not given stays as it is. */
-  setReverb(change: Partial<Reverb>): void
-  /** Chooses how much of the cabin model every player uses. */
-  setCabinCharacter(character: CabinCharacter): void
-  setReflection(change: Partial<CabinReflection>): void
-  setBass(change: Partial<BassManagement>): void
+  /** The low band's own limiter, one setting at a time (Settings › Sound › Low Limiter). */
+  setLimiter(told: Partial<Limiter>): void
   /** The cab's EQ switch, kept with WestPlay's settings: every player told (off: it shapes nothing). */
   setSoundEnabled(enabled: boolean): void
   /** The preset chosen in Settings › Sound › Presets, kept with WestPlay's settings like the rest. */
   setPreset(id: string | null): void
+  /** The screen's brightness, 0 to 1, kept with WestPlay's settings. */
+  setBrightness(level: number): void
   setOemMode(mode: OemMode): void
   /** The player's choice, in Settings: applied, and kept with WestPlay's settings. */
   chooseOemMode(mode: OemMode): void
@@ -177,7 +184,16 @@ export interface Preset {
 /** What survives a restart of the app: where you were and your choices, never the power state. */
 type Persisted = Pick<
   CabinState,
-  'navigation' | 'appearanceMode' | 'wallpaperId' | 'dashboardWidgets' | 'albumArt' | 'mapGrows' | 'hours24' | 'textSize'
+  | 'navigation'
+  | 'appearanceMode'
+  | 'wallpaperId'
+  | 'dashboardWidgets'
+  | 'albumArt'
+  | 'mapGrows'
+  | 'hours24'
+  | 'textSize'
+  | 'reduceTransparency'
+  | 'brightness'
 >
 
 const ALL_WIDGETS: Record<DashboardWidget, boolean> = { nowPlaying: true, destination: true, weather: true }
@@ -193,18 +209,17 @@ export const useCabin = create<CabinState>()(
       mapGrows: true,
       hours24: true,
       textSize: DEFAULT_TEXT_SIZE,
+      reduceTransparency: false,
       oemMode: 'auto',
       mapBuildings: true,
       mapRoads: true,
       equalizer: FLAT,
       equalizerCustom: false,
-      reverb: DEFAULT_REVERB,
-      cabinCharacter: DEFAULT_CABIN_CHARACTER,
-      reflection: DEFAULT_CABIN_REFLECTION,
-      bass: DEFAULT_BASS_MANAGEMENT,
+      limiter: DEFAULT_LIMITER,
       soundEnabled: true,
       preset: null,
       presets: [],
+      brightness: 1,
       power: INITIAL_POWER,
       navigate: (action) => set((state) => ({ navigation: navigate(state.navigation, action) })),
       setAppearanceMode: (appearanceMode) => set({ appearanceMode }),
@@ -219,51 +234,63 @@ export const useCabin = create<CabinState>()(
       setMapGrows: (mapGrows) => set({ mapGrows }),
       setHours24: (hours24) => set({ hours24 }),
       setTextSize: (step) => set({ textSize: toTextSize(step) }),
+      setReduceTransparency: (reduceTransparency) => set({ reduceTransparency }),
       setEqualizerBand: (band, db) => {
         const equalizer = toEqualizer({ ...useCabin.getState().equalizer, [band]: db })
         set({ equalizer, equalizerCustom: true })
-        if (isInHost()) postToHost({ type: 'equalizer', custom: true, ...equalizer })
+        if (isInHost())
+          postToHost({
+            type: 'equalizer',
+            custom: true,
+            ...equalizer,
+          })
       },
       setGraphicBand: (index, db) => {
         const now = useCabin.getState().equalizer
         const bands = now.bands.map((each, at) => (at === index ? db : each))
         const equalizer = toEqualizer({ ...now, bands })
         set({ equalizer, equalizerCustom: true })
-        if (isInHost()) postToHost({ type: 'equalizer', custom: true, ...equalizer })
+        if (isInHost())
+          postToHost({
+            type: 'equalizer',
+            custom: true,
+            ...equalizer,
+          })
       },
       setEqualizerAdvanced: (advanced) => {
         const equalizer = toEqualizer({ ...useCabin.getState().equalizer, advanced })
         set({ equalizer })
-        if (isInHost()) postToHost({ type: 'equalizer', custom: useCabin.getState().equalizerCustom, ...equalizer })
+        if (isInHost())
+          postToHost({
+            type: 'equalizer',
+            custom: useCabin.getState().equalizerCustom,
+            ...equalizer,
+          })
       },
       chooseEqualizer: (custom) => {
         set({ equalizerCustom: custom })
-        if (isInHost()) postToHost({ type: 'equalizer', custom, ...useCabin.getState().equalizer })
+        if (isInHost())
+          postToHost({
+            type: 'equalizer',
+            custom,
+            ...useCabin.getState().equalizer,
+          })
       },
       resetEqualizer: () => {
         // Both curves flat, in whichever set of bands is playing.
         const equalizer = toEqualizer({ ...FLAT, advanced: useCabin.getState().equalizer.advanced })
         set({ equalizer })
-        if (isInHost()) postToHost({ type: 'equalizer', custom: useCabin.getState().equalizerCustom, ...equalizer })
+        if (isInHost())
+          postToHost({
+            type: 'equalizer',
+            custom: useCabin.getState().equalizerCustom,
+            ...equalizer,
+          })
       },
-      setReverb: (change) => {
-        const reverb = toReverb({ ...useCabin.getState().reverb, ...change })
-        set({ reverb })
-        if (isInHost()) postToHost({ type: 'reverb', ...reverb })
-      },
-      setCabinCharacter: (character) => {
-        set({ cabinCharacter: character })
-        if (isInHost()) postToHost({ type: 'character', character })
-      },
-      setReflection: (change) => {
-        const reflection = toCabinReflection({ ...useCabin.getState().reflection, ...change })
-        set({ reflection })
-        if (isInHost()) postToHost({ type: 'reflection', ...reflection })
-      },
-      setBass: (change) => {
-        const bass = toBassManagement({ ...useCabin.getState().bass, ...change })
-        set({ bass })
-        if (isInHost()) postToHost({ type: 'bass', ...bass })
+      setLimiter: (told) => {
+        const limiter = toLimiter({ ...useCabin.getState().limiter, ...told })
+        set({ limiter })
+        if (isInHost()) postToHost({ type: 'limiter', ...limiter })
       },
       setSoundEnabled: (enabled) => {
         set({ soundEnabled: enabled })
@@ -273,6 +300,7 @@ export const useCabin = create<CabinState>()(
         set({ preset: id })
         if (isInHost()) postToHost({ type: 'preset', id })
       },
+      setBrightness: (level) => set({ brightness: Number.isFinite(level) ? Math.max(0, Math.min(1, level)) : 1 }),
       setOemMode: (oemMode) => set({ oemMode }),
       chooseOemMode: (oemMode) => {
         set({ oemMode })
@@ -284,7 +312,8 @@ export const useCabin = create<CabinState>()(
           return { power: next, truckScreen: next.phase === 'off' ? false : state.truckScreen }
         }),
       truckScreen: false,
-      setTruckScreen: (truckScreen) => set({ truckScreen }),
+      setTruckScreen: (truckScreen) =>
+        set({ truckScreen: truckScreen && useLive.getState().screenLayout !== 'tablet' }),
     }),
     {
       // The onboarding's demo keeps its own: it never changes the player's.
@@ -311,6 +340,8 @@ export const useCabin = create<CabinState>()(
         mapGrows: state.mapGrows,
         hours24: state.hours24,
         textSize: state.textSize,
+        reduceTransparency: state.reduceTransparency,
+        brightness: state.brightness,
       }),
       // Stored data comes from an earlier version of WestPlay (or was edited): keep only what is valid.
       merge: (stored, current) => ({ ...current, ...sanitize(stored as Partial<Persisted> | undefined) }),
@@ -345,6 +376,10 @@ function sanitize(stored: Partial<Persisted> | undefined): Partial<Persisted> {
   if (typeof stored.mapGrows === 'boolean') result.mapGrows = stored.mapGrows
   if (typeof stored.hours24 === 'boolean') result.hours24 = stored.hours24
   if (stored.textSize !== undefined) result.textSize = toTextSize(stored.textSize)
+  if (typeof stored.reduceTransparency === 'boolean') result.reduceTransparency = stored.reduceTransparency
+  if (typeof stored.brightness === 'number' && Number.isFinite(stored.brightness)) {
+    result.brightness = Math.max(0, Math.min(1, stored.brightness))
+  }
   return result
 }
 
@@ -448,7 +483,7 @@ export const useLive = create<LiveState>()(() => ({
   routeNext: 0,
   routeStops: [],
   offeredLines: null,
-weather: null,
+  weather: null,
   gameShown: true,
   menuGone: false,
   keybind: null,
@@ -484,8 +519,12 @@ export function connectHost(now: () => number = () => performance.now()): () => 
   const stopMessages = subscribeHostMessages(receiveHostMessage(now))
   const report = () => postToHost({ type: 'westplay', open: !useCabin.getState().truckScreen })
   report()
+  // The screen's brightness, for the host to scale the frame's light by: as the page connects, and as it changes.
+  const reportBrightness = () => postToHost({ type: 'brightness', level: useCabin.getState().brightness })
+  reportBrightness()
   const stopReports = useCabin.subscribe((state, previous) => {
     if (state.truckScreen !== previous.truckScreen) report()
+    if (state.brightness !== previous.brightness) reportBrightness()
   })
   // The field selected, for the player's own keyboard to type into (the host passes it to the game plugin).
   const reportSelection = () => postToHost({ type: 'typing', selection: useKeyboard.getState().selection })
@@ -615,10 +654,7 @@ function receiveHostMessage(now: () => number): (message: HostMessage) => void {
         useCabin.setState({
           equalizer: toEqualizer(message.equalizer),
           equalizerCustom: message.equalizerCustom === true,
-          reverb: toReverb(message.reverb),
-          cabinCharacter: toCabinCharacter(message.character),
-          reflection: toCabinReflection(message.reflection),
-          bass: toBassManagement(message.bass),
+          limiter: toLimiter(message.limiter),
           soundEnabled: message.soundEnabled !== false,
           preset: message.preset ?? null,
           mapBuildings: message.buildings !== false,
@@ -738,11 +774,41 @@ function receiveHostMessage(now: () => number): (message: HostMessage) => void {
       case 'neteaseMusicPlayback':
         receiveNeteaseMusicPlayback(message.playback)
         break
+      case 'radioStations':
+        receiveRadioStations(message.region, message.stations, message.failed)
+        break
+      case 'radioPlayback':
+        receiveRadioPlayback(message.playback)
+        break
       case 'musicFolder':
         receiveFolder(message.folder, message.songs)
         break
       case 'playerPlayback':
         receivePlayerPlayback(message.playback)
+        break
+      case 'safariTab':
+        receiveSafariTab(message.tab, message.state)
+        break
+      case 'safariOpened':
+        receiveSafariOpened(message.tab, message.opener)
+        break
+      case 'safariClosed':
+        receiveSafariClosed(message.tab)
+        break
+      case 'safariLetGo':
+        receiveSafariLetGo(message.tab)
+        break
+      case 'safariDialog':
+        receiveSafariDialog(message.tab, message.dialog)
+        break
+      case 'safariPicture':
+        receiveSafariPicture(message.tab, message.version)
+        break
+      case 'safariNoDownload':
+        receiveSafariNoDownload()
+        break
+      case 'safariPlaying':
+        receiveSafariPlaying(message.playing)
         break
       case 'youtubeMusic':
         receiveYouTubeMusicState(message)

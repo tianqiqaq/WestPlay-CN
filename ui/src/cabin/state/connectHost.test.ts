@@ -54,6 +54,40 @@ describe('connectHost', () => {
     expect(westplay()).toHaveLength(3)
   })
 
+  it("hands the screen's brightness to the host as it connects and as it's changed, held within 0 to 1", async () => {
+    const webview = fakeWebView()
+    vi.stubGlobal('window', { chrome: { webview: webview.bridge } })
+    const { connectHost, useCabin } = await import('./store')
+    const brightness = () => webview.posted.filter((message) => message.type === 'brightness')
+    const disconnect = connectHost(() => 0)
+    expect(brightness()).toEqual([{ type: 'brightness', level: 1 }])
+    useCabin.getState().setBrightness(0.4)
+    useCabin.getState().setBrightness(7)
+    useCabin.getState().setBrightness(Number.NaN)
+    expect(brightness().map((message) => message.type === 'brightness' && message.level)).toEqual([1, 0.4, 1])
+    // The same again: nothing to say.
+    useCabin.getState().setBrightness(1)
+    expect(brightness()).toHaveLength(3)
+    disconnect()
+  })
+
+  it("never hands WestPlay's tablet to the truck: it's no truck's screen", async () => {
+    const webview = fakeWebView()
+    vi.stubGlobal('window', { chrome: { webview: webview.bridge } })
+    const { connectHost, useCabin } = await import('./store')
+    const disconnect = connectHost(() => 0)
+    webview.send({ type: 'screen', layout: 'tablet' })
+    // The companion's key, or anything else asking: still open.
+    webview.send({ type: 'westplay', open: false })
+    useCabin.getState().setTruckScreen(true)
+    expect(useCabin.getState().truckScreen).toBe(false)
+    // On a truck's own screen it goes as before.
+    webview.send({ type: 'screen', layout: 'daf-2021' })
+    webview.send({ type: 'westplay', open: false })
+    expect(useCabin.getState().truckScreen).toBe(true)
+    disconnect()
+  })
+
   it("follows the companion's truck strip setting", async () => {
     const webview = fakeWebView()
     vi.stubGlobal('window', { chrome: { webview: webview.bridge } })
@@ -75,7 +109,13 @@ describe('connectHost', () => {
     const { connectHost, useCabin } = await import('./store')
     const disconnect = connectHost(() => 0)
     // The three tone bands flat, the fifteen-band curve not playing, and flat too.
-    const flat = () => ({ bass: 0, mid: 0, treble: 0, advanced: false, bands: new Array(15).fill(0) })
+    const flat = () => ({
+      bass: 0,
+      mid: 0,
+      treble: 0,
+      advanced: true,
+      bands: [5, 2, 0, 0, -1, 0, 0, 0, 0, 0, 0, 1, 3, 5, 7],
+    })
     expect(useCabin.getState().equalizer).toEqual(flat())
 
     // As the host keeps it; whatever it sends, each band whole dB within ±6 (none said: flat).
@@ -94,9 +134,20 @@ describe('connectHost', () => {
     useCabin.getState().setEqualizerBand('bass', -4)
     expect(useCabin.getState().equalizer).toEqual({ ...flat(), bass: -4 })
     expect(useCabin.getState().equalizerCustom).toBe(true)
-    expect(webview.posted.at(-1)).toEqual({ type: 'equalizer', custom: true, ...flat(), bass: -4 })
+    expect(webview.posted.at(-1)).toEqual({
+      type: 'equalizer',
+      custom: true,
+      ...flat(),
+      bass: -4,
+    })
     useCabin.getState().setEqualizerBand('treble', 9)
-    expect(webview.posted.at(-1)).toEqual({ type: 'equalizer', custom: true, ...flat(), bass: -4, treble: 6 })
+    expect(webview.posted.at(-1)).toEqual({
+      type: 'equalizer',
+      custom: true,
+      ...flat(),
+      bass: -4,
+      treble: 6,
+    })
     // Advanced: the fifteen bands play, each handed over as it's set, within ±12 dB.
     useCabin.getState().setEqualizerAdvanced(true)
     expect(webview.posted.at(-1)).toEqual({
@@ -108,7 +159,7 @@ describe('connectHost', () => {
       treble: 6,
     })
     useCabin.getState().setGraphicBand(2, 40)
-    const graphic = [0, 0, 12, ...new Array(12).fill(0)]
+    const graphic = [5, 2, 12, 0, -1, 0, 0, 0, 0, 0, 0, 1, 3, 5, 7]
     expect(webview.posted.at(-1)).toEqual({
       type: 'equalizer',
       custom: true,
@@ -125,6 +176,7 @@ describe('connectHost', () => {
       type: 'equalizer',
       custom: false,
       ...flat(),
+      advanced: false,
       bass: -4,
       treble: 6,
       bands: graphic,
@@ -137,59 +189,11 @@ describe('connectHost', () => {
     })
     expect(useCabin.getState().equalizerCustom).toBe(true)
     useCabin.getState().resetEqualizer()
-    expect(webview.posted.at(-1)).toEqual({ type: 'equalizer', custom: true, ...flat() })
-    disconnect()
-  })
-
-  it('keeps the cabin reverb from the host and sends Settings changes to it', async () => {
-    const webview = fakeWebView()
-    vi.stubGlobal('window', { chrome: { webview: webview.bridge } })
-    const { connectHost, useCabin } = await import('./store')
-    const disconnect = connectHost(() => 0)
-    expect(useCabin.getState().reverb).toEqual({ enabled: true, size: 55, amount: 32 })
-
-    webview.send({
-      type: 'settings',
-      truckStrip: 'auto',
-      reverb: { enabled: false, size: 82, amount: 44 },
+    expect(webview.posted.at(-1)).toEqual({
+      type: 'equalizer',
+      custom: true,
+      ...flat(),
     })
-    expect(useCabin.getState().reverb).toEqual({ enabled: false, size: 82, amount: 44 })
-    useCabin.getState().setReverb({ enabled: true, size: 130, amount: -4 })
-    expect(useCabin.getState().reverb).toEqual({ enabled: true, size: 100, amount: 0 })
-    expect(webview.posted.at(-1)).toEqual({ type: 'reverb', enabled: true, size: 100, amount: 0 })
-    disconnect()
-  })
-
-  it('switches the four cabin character A/B modes', async () => {
-    const webview = fakeWebView()
-    vi.stubGlobal('window', { chrome: { webview: webview.bridge } })
-    const { connectHost, useCabin } = await import('./store')
-    const disconnect = connectHost(() => 0)
-    expect(useCabin.getState().cabinCharacter).toBe('full')
-    webview.send({ type: 'settings', truckStrip: 'auto', character: 'impulse' })
-    expect(useCabin.getState().cabinCharacter).toBe('impulse')
-    useCabin.getState().setCabinCharacter('equalized')
-    expect(useCabin.getState().cabinCharacter).toBe('equalized')
-    expect(webview.posted.at(-1)).toEqual({ type: 'character', character: 'equalized' })
-    disconnect()
-  })
-
-  it('keeps the reflection strength and always-on bass crossover', async () => {
-    const webview = fakeWebView()
-    vi.stubGlobal('window', { chrome: { webview: webview.bridge } })
-    const { connectHost, useCabin } = await import('./store')
-    const disconnect = connectHost(() => 0)
-    expect(useCabin.getState().reflection).toEqual({ amount: 100 })
-    expect(useCabin.getState().bass).toEqual({ cutoff: 60 })
-    webview.send({ type: 'settings', truckStrip: 'auto', reflection: { amount: 64 }, bass: { cutoff: 85 } })
-    expect(useCabin.getState().reflection).toEqual({ amount: 64 })
-    expect(useCabin.getState().bass).toEqual({ cutoff: 85 })
-    useCabin.getState().setReflection({ amount: 140 })
-    expect(useCabin.getState().reflection).toEqual({ amount: 100 })
-    expect(webview.posted.at(-1)).toEqual({ type: 'reflection', amount: 100 })
-    useCabin.getState().setBass({ cutoff: 10 })
-    expect(useCabin.getState().bass).toEqual({ cutoff: 30 })
-    expect(webview.posted.at(-1)).toEqual({ type: 'bass', cutoff: 30 })
     disconnect()
   })
 

@@ -1,24 +1,27 @@
 import { useEffect, useState } from 'react'
 import { isInHost, isMirrored, postToHost } from '../shared/host'
 import { appleMusicPlayer, pauseAppleMusicWithGame } from './apps/music/pauseWithGame'
-import { keybinds } from './apps/keybinds'
+import { BRIGHTNESS_STEP, keybinds, stepped } from './apps/keybinds'
 import { oneAtATime } from './apps/oneAtATime'
 import { pauseSpotifyWithGame, spotifyPlayer } from './apps/spotify/pauseWithGame'
 import { pauseYouTubeWithGame, youtubePlayer } from './apps/youtube/pauseWithGame'
 import { pauseYouTubeMusicWithGame, youtubeMusicPlayer } from './apps/youtubeMusic/pauseWithGame'
 import { pausePlayerWithGame, playerAppPlayer } from './apps/player/pauseWithGame'
+import { pauseSafariWithGame, safariPlayer } from './apps/safari/pauseWithGame'
 import { pauseQqMusicWithGame, qqMusicPlayer } from './apps/qqMusic/pauseWithGame'
 import { pauseNeteaseMusicWithGame, neteaseMusicPlayer } from './apps/neteaseMusic/pauseWithGame'
+import { pauseRadioWithGame, radioPlayer } from './apps/radio/pauseWithGame'
 import { AppScreen } from './apps/AppScreen'
 import { BootScreen } from './boot/BootScreen'
 import { Dashboard } from './dashboard/Dashboard'
 import { Home } from './home/Home'
 import { followTruckersMp } from './maps/truckersmp'
+import { logGuidance } from './maps/guidanceLog'
 import { routeClicksDuringTransitions } from './shell/clickThrough'
 import { installDragScroll } from './shell/dragScroll'
 import { Cursor } from './shell/Cursor'
 import { Shell } from './shell/Shell'
-import { showVolume } from './shell/volumeShown'
+import { showBrightness, showVolume } from './shell/volumeShown'
 import { type Route, routeKey } from './state/navigation'
 import { nextPhaseAt, type PowerPhase } from './state/power'
 import { meterFrames } from './state/frameMeter'
@@ -39,8 +42,10 @@ const PLAYERS = [
   appleMusicPlayer,
   qqMusicPlayer,
   neteaseMusicPlayer,
+  radioPlayer,
   youtubeMusicPlayer,
   playerAppPlayer,
+  safariPlayer,
 ]
 
 /** The in-cabin screen: the shell around the screen for the current route, after the boot sequence. */
@@ -55,15 +60,17 @@ export function CabinApp() {
     document.documentElement.classList.add('mirror')
     return () => document.documentElement.classList.remove('mirror')
   }, [])
-  // YouTube, Spotify, Apple Music, QQ Music, NetEase Cloud Music, YouTube Music and Player pause with the game
-  // (its menu, tabbing out) and play on after.
+  // YouTube, Spotify, Apple Music, QQ Music, NetEase Cloud Music, the radio, YouTube Music, Player and
+  // Safari pause with the game (its menu, tabbing out) and play on after.
   useEffect(() => pauseYouTubeWithGame(), [])
   useEffect(() => pauseSpotifyWithGame(), [])
   useEffect(() => pauseAppleMusicWithGame(), [])
   useEffect(() => pauseYouTubeMusicWithGame(), [])
   useEffect(() => pausePlayerWithGame(), [])
+  useEffect(() => pauseSafariWithGame(), [])
   useEffect(() => pauseQqMusicWithGame(), [])
   useEffect(() => pauseNeteaseMusicWithGame(), [])
+  useEffect(() => pauseRadioWithGame(), [])
   // One of them at a time: the newest to start plays on, the others pause (apps/oneAtATime.ts).
   useEffect(() => oneAtATime(PLAYERS), [])
   // The player's keybinds pressed in the game: the music's volume, or play/pause (apps/keybinds.ts).
@@ -74,6 +81,8 @@ export function CabinApp() {
   useEffect(() => followTruckersMp(), [])
   // The page's own frames while the game runs, for the host's performance line (state/frameMeter.ts).
   useEffect(() => meterFrames(), [])
+  // The guidance shown, every 30 s with a route, for the host's log (maps/guidanceLog.ts).
+  useEffect(() => logGuidance(), [])
   useEffect(() => routeClicksDuringTransitions(), [])
   // Lists follow a drag, as on a touch screen (the cab has a mouse).
   useEffect(() => installDragScroll(), [])
@@ -106,13 +115,22 @@ export function CabinApp() {
   )
 }
 
-/** Acts on each keybind pressed in the game, for the cab's players, showing a volume it sets. Returns the
- * function that stops it. */
+/** Acts on each keybind pressed in the game, for the cab's players, showing a volume it sets; the brightness keys
+ * step the screen's brightness (as Settings' slider sets it), shown as the volume is. Returns the function that
+ * stops it. */
 function followKeybinds(): () => void {
   const binds = keybinds(PLAYERS)
   const stop = useLive.subscribe((live, before) => {
     if (!live.keybind || live.keybind.count === before.keybind?.count) return
-    const shown = binds.press(live.keybind.action)
+    const { action } = live.keybind
+    if (action === 'brightnessDown' || action === 'brightnessUp') {
+      const { brightness, setBrightness } = useCabin.getState()
+      const level = stepped(brightness, action === 'brightnessUp' ? 1 : -1, BRIGHTNESS_STEP)
+      setBrightness(level)
+      showBrightness(level)
+      return
+    }
+    const shown = binds.press(action)
     if (shown) showVolume(shown.volume)
   })
   return () => {

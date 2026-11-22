@@ -20,6 +20,9 @@ export interface HostStatus {
   screenDrawing: boolean
   /** Whether the truck the player is in is one WestPlay shows in, as the plugin last saw (`null`: not known yet). */
   truckSupported: boolean | null
+  /** The coach the player drives: how many speakers its passengers' set plays through (`null`: a truck, no game,
+   * or the coach's parts not read yet). */
+  coachSpeakers: number | null
   /** Whether the game runs as administrator: WestPlay can't read its route, guidance or weather then. */
   gameElevated: boolean
   /** Whether WestPlay is open on the truck's screen (otherwise the truck's original screen shows), as the
@@ -81,7 +84,15 @@ export interface ProfileMap {
   game: GameKind
   /** The profile's folder, as the setup's check of the game names it (`ProfileCheck.dir`). */
   dir: string
+  /** Its map's folder, by name: profiles sharing a map share it (what `prepareMapsAgain` asks by). */
+  folder: string
   status: MapStatus
+  /** The map it plays (`europe`, or a standalone map mod's), the mods that change it as the game names them, and
+   * how many of those can't be read: as the host worked them out from the profile now (setup's check of the game
+   * may be older: a mod turned off since). */
+  map?: string
+  mapMods?: string[]
+  unreadable?: number
   /** The map mods left out of its map, as the Mod Manager names them: their files couldn't be read (a damaged
    * or protected archive), so the map was made from the rest. */
   leftOut?: string[]
@@ -101,8 +112,9 @@ export type MapStatus =
   | { state: 'ready' }
   /** How far, 0 to 1. */
   | { state: 'building'; done: number; stage: MapStage }
-  /** To build once the game is closed. */
-  | { state: 'waitingForGame' }
+  /** To build once the game is closed; `stopped`: its preparation was under way when the game started, and was
+   * stopped. */
+  | { state: 'waitingForGame'; stopped?: boolean }
   /** To build once the PC has `needed` bytes of memory free (it has `free` now). */
   | { state: 'waitingForMemory'; needed: number; free: number }
   /** Road to Heavy: no map for it. */

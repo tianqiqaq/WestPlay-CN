@@ -20,37 +20,43 @@
   --system-blue: #007aff;
 }
 
+/* Its corners follow the panel's round it (owner 2026-11-07, "rounded corner consistency"): each corner the one
+   round it less the room between them. The keyboard's, the app panel's less its margin (shell.css); the keys',
+   the keyboard's less its padding: the padding is what's left of the panel's corner once the margin and the keys'
+   own corner are taken (owner: a wider margin and padding, the keys' corners as they are). */
 .keyboard {
   --gap: 10px;
+  --key-radius: 20px;
+  --keyboard-radius: calc(var(--panel-radius) - var(--keyboard-margin));
+  --keyboard-padding: max(12px, calc(var(--keyboard-radius) - var(--key-radius)));
   position: absolute;
   /* Right of the sidebar, inside the app area's margins. */
-  left: calc(var(--content-left, 170px) + 8px);
-  right: calc(var(--edge) + 8px);
+  left: calc(var(--content-left, 170px) + var(--keyboard-margin));
+  right: calc(var(--edge) + var(--keyboard-margin));
   /* Shared with what makes room for it (shell.css). */
   bottom: var(--keyboard-bottom);
   height: var(--keyboard-height);
   z-index: 2;
-  padding: 18px 16px;
-  border-radius: var(--panel-radius);
+  padding: var(--keyboard-padding);
+  border-radius: var(--keyboard-radius);
   display: grid;
   grid-template-rows: repeat(4, 1fr);
   gap: 12px;
-  background: var(--keyboard-glass);
-  backdrop-filter: blur(30px) saturate(140%);
-  box-shadow:
-    inset 0 1px 0 var(--glass-rim),
-    var(--shadow-raised-large);
-  /* Away below the screen's edge until a field is selected; it rises from there. */
-  translate: 0 calc(100% + 60px);
+  /* Liquid Glass (liquidGlass.css), as iOS 26's keyboard: its own tint; its keys fills on it, never glass on glass. */
+  --glass: var(--keyboard-glass);
+  /* Away below the screen's edge until a field is selected; it rises from there, over what's on the screen (nothing
+     moves or changes size for it), by transform alone (owner 2026-11-08: "transform functions STRICTLY"). */
+  transform: translateY(calc(100% + 60px));
+  will-change: transform;
   /* Hidden once it's down, so its glass costs nothing while it's away. */
   visibility: hidden;
   transition:
-    translate var(--motion-duration) var(--motion-ease),
+    transform var(--motion-duration) var(--motion-ease),
     visibility 0s linear var(--motion-duration);
 }
 
 .keyboard.shown {
-  translate: 0 0;
+  transform: translateY(0);
   visibility: visible;
   transition-delay: 0s;
 }
@@ -68,11 +74,12 @@
   min-width: 0;
   padding: 0;
   border: 0;
-  border-radius: 20px;
+  border-radius: var(--key-radius);
   background: var(--key);
   color: var(--text);
   font: inherit;
-  font-size: 30px;
+  /* Larger than iOS's keys, as the cab reads them from further off (owner 2026-11-11: still too small). */
+  font-size: 36px;
   font-weight: 450;
   display: block;
   align-content: center;
@@ -91,7 +98,7 @@
 
 .keyboard .key.fn {
   background: var(--key-fn);
-  font-size: 21px;
+  font-size: 25px;
   font-weight: 600;
 }
 
@@ -128,7 +135,7 @@
 
 .keyboard-row.bottom .key.space {
   flex-grow: 6;
-  font-size: 21px;
+  font-size: 25px;
   font-weight: 500;
   color: color-mix(in srgb, var(--text) 55%, transparent);
 }
@@ -137,7 +144,7 @@
   flex-grow: 2.2;
   background: var(--system-blue);
   color: #fff;
-  font-size: 22px;
+  font-size: 26px;
   font-weight: 650;
 }
 
@@ -153,7 +160,7 @@
   border-radius: 28px;
   background: var(--key-bubble);
   box-shadow:
-    inset 0 1px 0 var(--glass-rim),
+    inset 0 1px 0 var(--lg-ring-drawn),
     0 12px 30px rgb(0 0 0 / 0.35);
   color: var(--text);
   font-size: 58px;
@@ -314,30 +321,7 @@
 @keyframes keyboard-chip-in {
   from {
     opacity: 0;
-    translate: 0 8px;
-  }
-}
-
-/* A key the player's own keyboard typed: its letter's bubble shows for a moment, as when it's pressed on
-   screen; the key itself doesn't change colour (no blue, as with the cursor). */
-.keyboard .key-flash {
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  pointer-events: none;
-}
-
-.keyboard .key-flash .key-bubble {
-  animation: key-flash-bubble 260ms var(--motion-ease) forwards;
-}
-
-@keyframes key-flash-bubble {
-  0%,
-  60% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 0;
+    transform: translateY(8px);
   }
 }
 
@@ -352,18 +336,85 @@
    (owner: the keys filling it to its edges "looks awful"), at the same height. */
 @container carplay (max-height: 520px) {
   .keyboard {
-    /* Its height and place: shell.css's short screen's. */
+    /* Its height and margin: shell.css's short screen's; its padding wide round the smaller keys (owner
+       2026-11-03), as its corners give it. */
     --gap: 5px;
-    padding: 24px 32px;
+    --key-radius: 13px;
     gap: 5px;
   }
 
   .keyboard .key {
-    border-radius: 13px;
-    font-size: 22px;
+    font-size: 27px;
   }
 
   .keyboard .key.fn {
-    font-size: 16px;
+    font-size: 19px;
+  }
+}
+
+/* Chinese: what the pinyin typed so far may become, just under the field being typed into (where the caret is:
+   TextField.tsx places it in the screen's own pixels), each picked by its number on the player's own keyboard or
+   by a tap. Larger than the keys' letters: the words are what's being chosen, read at a glance from the cab.
+   Under `.shell`, as the screen's buttons carry `font: inherit` (shell.css) which would otherwise win over the
+   candidate's own size and leave its words at the screen's base size (owner 2026-11-11: numbers big, words
+   tiny). */
+.text-field-candidates {
+  position: absolute;
+  z-index: 12;
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 22px;
+  background: var(--keyboard-glass);
+  backdrop-filter: blur(30px) saturate(140%);
+  box-shadow:
+    inset 0 1px 0 var(--glass-rim),
+    var(--shadow-raised-large);
+  overflow-x: auto;
+  scrollbar-width: none;
+  animation: text-field-candidates-in 200ms var(--motion-ease) both;
+}
+
+/* Two classes, so the screen's `button` rule (`.shell button`, shell.css: font, padding and background
+   inherited) doesn't take the candidate's own. */
+.text-field-candidates .text-field-candidate {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: none;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--key);
+  color: var(--text);
+  white-space: nowrap;
+}
+
+/* The word and its number carry the size themselves (a span of their own, not the button's font), so no rule for
+   the screen's buttons can leave them at the screen's base size. */
+/* About the keys' own letters (36px) at the default text size, rather than over them (owner 2026-11-11: the
+   larger size read as too big). */
+.text-field-candidate-word {
+  font-size: clamp(28px, calc(30px * var(--text-scale, 1)), 48px);
+  font-weight: 550;
+}
+
+.text-field-candidate-number {
+  font-size: clamp(17px, calc(18px * var(--text-scale, 1)), 26px);
+  font-weight: 650;
+  opacity: 0.55;
+}
+
+@keyframes text-field-candidates-in {
+  from {
+    opacity: 0;
+    translate: 0 -8px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .text-field-candidates {
+    animation: none;
   }
 }
