@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Button, Note, Tick } from '../room/parts'
 import { banner, explain, useGameRunning, useWords } from '../room/room'
 import { useScreen } from '../room/screen'
-import { type InstallReport, installIntoGame, type SetupState } from '../setup'
+import { type InstallReport, installIntoGame, type SetupState, setupState } from '../setup'
 import { installUpdate, noteLines, type Offer, onUpdateProgress, type Progress } from '../update'
 import type { CompanionWords } from './words'
 
@@ -128,6 +128,19 @@ export function FinishUpdate({ cw, setup }: { cw: CompanionWords; setup: SetupSt
     setWorking(true)
     setError(null)
     try {
+      // The app puts the plugin and mod in by itself as it starts (app/src/setup.rs `sync_after_update`): a game
+      // it has done already needs nothing here, and this one would only build the same mod again.
+      const current = await setupState()
+      if (!current.outdated.some((each) => each.dir === game.dir)) {
+        const left = setup.outdated.filter((each) => each.dir !== game.dir && !finished.includes(each.dir))
+        setFinished([...finished, game.dir])
+        tried.current = false
+        if (left.length === 0) {
+          screen.reboot()
+          screen.banner(banner(cw.update.banners.updated))
+        }
+        return
+      }
       const result = await installIntoGame(game.dir, administrator)
       setReport(result)
       if (result.done) {

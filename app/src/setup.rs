@@ -36,6 +36,9 @@ struct Inner {
     game: Arc<SetUpGame>,
     /// WestPlay's plugin, to install (`None`: this build of WestPlay has none).
     plugin: Option<PathBuf>,
+    /// One install at a time: the sync after an update and the companion's installs (`install_into_game`) wait
+    /// for each other, so WestPlay's game mod is built and written once, whole.
+    installing: Mutex<()>,
 }
 
 impl SetupStore {
@@ -43,7 +46,13 @@ impl SetupStore {
     pub fn load(dir: &Path, app: &AppHandle) -> Self {
         let record = Record::load(dir);
         let game = Arc::new(SetUpGame::new(record.dirs()));
-        Self(Arc::new(Inner { dir: dir.to_path_buf(), record: Mutex::new(record), game, plugin: plugin_file(app) }))
+        Self(Arc::new(Inner {
+            dir: dir.to_path_buf(),
+            record: Mutex::new(record),
+            game,
+            plugin: plugin_file(app),
+            installing: Mutex::new(()),
+        }))
     }
 
     /// The games set up, for the host.
@@ -131,9 +140,10 @@ pub struct SetupState {
     game: Option<GameInfo>,
     /// Every game WestPlay is set up in (still there).
     games: Vec<GameInfo>,
-    /// WestPlay was updated since it put its plugin and mod into a game set up: the companion puts the new ones
-    /// in (`install_into_game`) once the games are closed. Never in a development build (its plugin is the
-    /// development loop's to install).
+    /// WestPlay was updated since it put its plugin and mod into a game set up: [`sync_after_update`] puts the
+    /// new ones in by itself once the games are closed (the companion's update window asks about a game that
+    /// needs administrator rights). Never in a development build (its plugin is the development loop's to
+    /// install).
     updated: bool,
     /// Those games ([`Self::updated`]), each to put the new plugin and mod into.
     outdated: Vec<GameInfo>,
@@ -402,8 +412,10 @@ pub fn watch_installed_mods(store: &SetupStore) {
 }
 
 /// One look ([`watch_installed_mods`]) at each game set up; `looked` what the last one that needed nothing more
-/// was from, by the game's folder.
+/// was from, by the game's folder. Waits for any install under way (the sync after an update, the companion's):
+/// it builds the same mod, and one installer at a time keeps it whole.
 fn look_at_mods(inner: &Inner, looked: &mut HashMap<PathBuf, ModsStamp>) {
+    let _installing = inner.installing.lock().unwrap_or_else(|e| e.into_inner());
     let record = inner.record();
     if !record.finished {
         return;
@@ -531,7 +543,7 @@ pub struct InstallReport {
 /// Installs WestPlay into the game in `dir`: its mod, built from this game, into WestPlay's own folder (the
 /// plugin mounts it into the game: `game_mod`), and its plugin into the game's plugins folder (with
 /// `administrator`, through Windows' prompt, for that one copy). Once both are in, WestPlay is set up in this
-/// game.
+/// game. One install at a time: the sync after an update installs with it too.
 #[tauri::command]
 pub async fn install_into_game(
     dir: PathBuf,
@@ -539,24 +551,31 @@ pub async fn install_into_game(
     store: State<'_, SetupStore>,
 ) -> Result<InstallReport, String> {
     let inner = store.0.clone();
-    blocking(move || {
-        log!("setup: installing into {}{}", dir.display(), if administrator { ", as administrator" } else { "" });
-        let game = Game::recognise(&dir).ok_or("gameGone")?;
-        let mod_error = install_mod(&game).err();
-        log!("setup: the plugin into {}", game.plugins_dir().display());
-        let plugin = match inner.plugin.as_deref() {
-            None => PluginOutcome::Failed { error: "noPlugin".into() },
-            Some(ours) => install_plugin(&game, ours, administrator),
-        };
-        let done = mod_error.is_none() && matches!(plugin, PluginOutcome::Installed);
-        let mod_said = mod_error.as_deref().map_or_else(|| "in place".to_owned(), |error| format!("not in: {error}"));
-        log!("setup: installed: the mod {mod_said}; the plugin {plugin:?}");
-        if done {
-            inner.update(|record| record.set_up(&game, VERSION))?;
-        }
-        Ok(InstallReport { plugin, mod_error, done })
-    })
-    .await
+    blocking(move || install_into(&inner, &dir, administrator)).await
+}
+
+fn install_into(inner: &Inner, dir: &Path, administrator: bool) -> Result<InstallReport, String> {
+    let _installing = inner.installing.lock().unwrap_or_else(|e| e.into_inner());
+    install_into_now(inner, dir, administrator)
+}
+
+/// [`install_into`], the install lock held.
+fn install_into_now(inner: &Inner, dir: &Path, administrator: bool) -> Result<InstallReport, String> {
+    log!("setup: installing into {}{}", dir.display(), if administrator { ", as administrator" } else { "" });
+    let game = Game::recognise(dir).ok_or("gameGone")?;
+    let mod_error = install_mod(&game).err();
+    log!("setup: the plugin into {}", game.plugins_dir().display());
+    let plugin = match inner.plugin.as_deref() {
+        None => PluginOutcome::Failed { error: "noPlugin".into() },
+        Some(ours) => install_plugin(&game, ours, administrator),
+    };
+    let done = mod_error.is_none() && matches!(plugin, PluginOutcome::Installed);
+    let mod_said = mod_error.as_deref().map_or_else(|| "in place".to_owned(), |error| format!("not in: {error}"));
+    log!("setup: installed: the mod {mod_said}; the plugin {plugin:?}");
+    if done {
+        inner.update(|record| record.set_up(&game, VERSION))?;
+    }
+    Ok(InstallReport { plugin, mod_error, done })
 }
 
 /// The mod into WestPlay's own folder; then, from a game WestPlay 1.2 set up, its copy taken out of the game's
@@ -610,6 +629,127 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// (`installed_by`; none: one from before versions were kept). Never in a development build.
 fn is_update(installed_by: Option<&str>) -> bool {
     !cfg!(debug_assertions) && installed_by != Some(VERSION)
+}
+
+/// How often the games are looked at while the plugin and mod of an update wait for one to close.
+const SYNC_LOOK: Duration = Duration::from_secs(5);
+
+/// Puts WestPlay's plugin and mod into the games an update left set up by another WestPlay, on its own, once the
+/// games are closed. A plugin that needs administrator rights is not asked for silently: that game is left for
+/// the companion's update window ([`install_into_game`]) to ask about, as before. Does nothing in a development
+/// build: its plugin and mod are the development loop's to install (`is_update` says so too).
+pub fn sync_after_update(store: &SetupStore) {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let inner = store.0.clone();
+    let sync = move || {
+        let mut skipped: Vec<PathBuf> = Vec::new();
+        let mut said_waiting = false;
+        let mut said_open = false;
+        loop {
+            let waiting: Vec<Game> =
+                outdated_games(&inner).into_iter().filter(|game| !skipped.contains(&game.dir)).collect();
+            if waiting.is_empty() {
+                if said_waiting && skipped.is_empty() {
+                    log!("setup: WestPlay {VERSION}'s plugin and mod are in every game set up");
+                }
+                return;
+            }
+            if !said_waiting {
+                log!(
+                    "setup: the plugin and mod of this WestPlay go into {} game(s) set up by another version, once \
+                     they're closed",
+                    waiting.len()
+                );
+                said_waiting = true;
+            }
+            if game::running() {
+                if !said_open {
+                    log!("setup: the game is open: the plugin and mod wait for it to close");
+                    said_open = true;
+                }
+                std::thread::sleep(SYNC_LOOK);
+                continue;
+            }
+            said_open = false;
+            for game in &waiting {
+                match sync_game(&inner, game) {
+                    Ok(Some(report)) if report.done => {
+                        log!("setup: the plugin and mod into {} by themselves (WestPlay {VERSION})", game.dir.display())
+                    }
+                    Ok(Some(report)) if matches!(&report.plugin, PluginOutcome::InUse) => {
+                        log!("setup: the game opened while its plugin went in: it waits for it to close again");
+                    }
+                    Ok(Some(report)) => {
+                        let why = match &report.plugin {
+                            PluginOutcome::NeedsAdministrator => "it needs administrator rights".to_owned(),
+                            PluginOutcome::Declined => "administrator rights weren't given".to_owned(),
+                            PluginOutcome::Failed { error } => error.clone(),
+                            PluginOutcome::Installed => {
+                                report.mod_error.clone().unwrap_or_else(|| "its mod couldn't be put in".to_owned())
+                            }
+                            // In use: handled above.
+                            PluginOutcome::InUse => "the game is open".to_owned(),
+                        };
+                        log!(
+                            "setup: {}: not put in by themselves ({why}): the companion's update window takes over",
+                            game.dir.display()
+                        );
+                        skipped.push(game.dir.clone());
+                    }
+                    Ok(None) => {
+                        log!("setup: {} got the plugin and mod from the companion's update window", game.dir.display())
+                    }
+                    Err(error) => {
+                        log!(
+                            "setup: {}: not put in by themselves ({error}): the companion's update window takes over",
+                            game.dir.display()
+                        );
+                        skipped.push(game.dir.clone());
+                    }
+                }
+            }
+            if waiting.iter().any(|game| !skipped.contains(&game.dir)) {
+                std::thread::sleep(SYNC_LOOK);
+            }
+        }
+    };
+    if let Err(error) = std::thread::Builder::new().name("westplay-sync".into()).spawn(sync) {
+        log!("setup: can't put the plugin and mod of this WestPlay in by itself: {error}");
+    }
+}
+
+/// The games set up by another WestPlay, or whose plugin there isn't this WestPlay's: what an update leaves to
+/// put in. None in a development build, before the onboarding's end, or when this build has no plugin.
+fn outdated_games(inner: &Inner) -> Vec<Game> {
+    if cfg!(debug_assertions) || inner.plugin.is_none() {
+        return Vec::new();
+    }
+    let record = inner.record();
+    if !record.finished {
+        return Vec::new();
+    }
+    record.games().into_iter().filter(|game| needs_set_up(inner, &record, game)).collect()
+}
+
+/// Whether `game` was set up by another WestPlay than this one, or its plugin there isn't this WestPlay's.
+fn needs_set_up(inner: &Inner, record: &Record, game: &Game) -> bool {
+    is_update(record.version_of(game))
+        || match inner.plugin.as_deref() {
+            Some(ours) => !matches!(plugin::state(game, ours), Ok(plugin::State::Current)),
+            None => false,
+        }
+}
+
+/// [`install_into`] for [`sync_after_update`], the install lock taken first: the companion's update window may
+/// have put them in while it waited. `Ok(None)`: nothing was left to do.
+fn sync_game(inner: &Inner, game: &Game) -> Result<Option<InstallReport>, String> {
+    let _installing = inner.installing.lock().unwrap_or_else(|e| e.into_inner());
+    if !needs_set_up(inner, &inner.record(), game) {
+        return Ok(None);
+    }
+    install_into_now(inner, &game.dir, false).map(Some)
 }
 
 /// The onboarding was gone through to its end.

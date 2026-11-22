@@ -309,6 +309,9 @@ fn main() {
             let shared = Arc::new(SharedSettings::new(file.load()));
             let setup = SetupStore::load(&config_dir, app.handle());
             setup::watch_installed_mods(&setup);
+            // An update's plugin and mod go into the games set up by themselves, once they're closed (a game
+            // that needs administrator rights is left for the companion's update window to ask about).
+            setup::sync_after_update(&setup);
             let customize = customize::Customize {
                 dir: app.path().app_local_data_dir()?.join(westplay_host::customize::FOLDER),
                 changed: Arc::default(),
