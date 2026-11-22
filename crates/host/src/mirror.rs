@@ -127,6 +127,23 @@ static CLIENTS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 /// The mouse events the viewers sent, for the host to take ([`take_inputs`]).
 static INPUTS: OnceLock<Mutex<VecDeque<InputEvent>>> = OnceLock::new();
 
+/// The page as the game has it laid out, and the rows its frame carries it in (`PagePlace`): the viewer draws the
+/// frame at the page's own shape, so the phone's picture is the truck's screen's and not a squashed copy of it.
+static PAGE: OnceLock<Mutex<(u32, u32, u32)>> = OnceLock::new();
+
+fn page() -> &'static Mutex<(u32, u32, u32)> {
+    PAGE.get_or_init(|| Mutex::new((FRAME_WIDTH, FRAME_HEIGHT, FRAME_HEIGHT)))
+}
+
+/// The page's shape as the game's screen has it: its width, its height, and the rows the frame carries it in.
+pub fn set_page(width: u32, height: u32, rows: u32) {
+    *page().lock().unwrap_or_else(|e| e.into_inner()) = (width.max(1), height.max(1), rows.max(1));
+}
+
+fn page_shape() -> (u32, u32, u32) {
+    *page().lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn raw() -> &'static Inbox<Raw> {
     RAW.get_or_init(Inbox::new)
 }
@@ -419,6 +436,9 @@ canvas{position:fixed;cursor:none;pointer-events:auto;background:#000}
 (() => {
   'use strict';
   const W = 1280, H = 720;
+  // The page the truck's screen shows, and the rows the frame carries it in (the host's PagePlace): the picture is
+  // drawn at the page's own shape, so it isn't squashed the way a 16:9 window would squash it.
+  let shapeW = W, shapeH = H, shapeRows = H;
   const canvas = document.getElementById('frame');
   const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
   const hint = document.getElementById('hint');
@@ -441,9 +461,9 @@ canvas{position:fixed;cursor:none;pointer-events:auto;background:#000}
   const IN_FLIGHT = 2;
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   function layout() {
-    const scale = Math.min(window.innerWidth / W, window.innerHeight / H);
-    const w = Math.max(1, Math.round(W * scale));
-    const h = Math.max(1, Math.round(H * scale));
+    const scale = Math.min(window.innerWidth / shapeW, window.innerHeight / shapeH);
+    const w = Math.max(1, Math.round(shapeW * scale));
+    const h = Math.max(1, Math.round(shapeH * scale));
     const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
     canvas.style.width = w + 'px';
     canvas.style.height = h + 'px';
@@ -455,7 +475,7 @@ canvas{position:fixed;cursor:none;pointer-events:auto;background:#000}
     ctx.imageSmoothingQuality = 'high';
   }
   function draw(bitmap) {
-    if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) layout();
+    // The frame's rows are the page squeezed into them: drawing it over the page's shape puts it back.
     ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
     hint.hidden = true;
   }
@@ -476,6 +496,15 @@ canvas{position:fixed;cursor:none;pointer-events:auto;background:#000}
         return;
       }
       const got = Number(response.headers.get('X-Seq') || seq + 1);
+      const pageW = Number(response.headers.get('X-Page-Width') || 0);
+      const pageH = Number(response.headers.get('X-Page-Height') || 0);
+      const rows = Number(response.headers.get('X-Frame-Rows') || 0);
+      if (pageW && pageH && rows && (pageW !== shapeW || pageH !== shapeH || rows !== shapeRows)) {
+        shapeW = pageW;
+        shapeH = pageH;
+        shapeRows = rows;
+        layout();
+      }
       const blob = await response.blob();
       // The next request goes out before this frame decodes: decoding overlaps the wait.
       release();
@@ -502,7 +531,7 @@ canvas{position:fixed;cursor:none;pointer-events:auto;background:#000}
     const box = canvas.getBoundingClientRect();
     return {
       x: clamp((event.clientX - box.left) / (box.width || 1) * W, W),
-      y: clamp((event.clientY - box.top) / (box.height || 1) * H, H),
+      y: clamp((event.clientY - box.top) / (box.height || 1) * shapeRows, shapeRows),
     };
   }
   function send(event) {
@@ -556,6 +585,7 @@ fn respond_html(request: Request) {
 }
 
 fn info(request: Request, context: &Context) {
+    let (page_width, page_height, rows) = page_shape();
     let body = serde_json::json!({
         "port": context.port,
         "lan": context.lan,
@@ -563,6 +593,9 @@ fn info(request: Request, context: &Context) {
         "fps": FPS.load(Ordering::Relaxed),
         "width": FRAME_WIDTH,
         "height": FRAME_HEIGHT,
+        "pageWidth": page_width,
+        "pageHeight": page_height,
+        "frameRows": rows,
     })
     .to_string();
     let headers = vec![header("Content-Type", "application/json"), header("Cache-Control", "no-store")];
@@ -589,10 +622,14 @@ fn frame(request: Request, url: &str) {
         {
             let (seq, jpeg) = (*seq, Arc::clone(jpeg));
             drop(latest);
+            let (page_width, page_height, rows) = page_shape();
             let headers = vec![
                 header("Content-Type", "image/jpeg"),
                 header("Cache-Control", "no-store"),
                 header("X-Seq", &seq.to_string()),
+                header("X-Page-Width", &page_width.to_string()),
+                header("X-Page-Height", &page_height.to_string()),
+                header("X-Frame-Rows", &rows.to_string()),
             ];
             let _ = request.respond(Response::new(StatusCode(200), headers, &jpeg[..], Some(jpeg.len()), None));
             return;
@@ -684,6 +721,17 @@ mod tests {
         assert!(VIEWER.contains("createImageBitmap"), "a frame decoded off the drawing");
         assert!(VIEWER.contains("cursor:none"), "no second cursor over the frame's own");
         assert!(VIEWER.contains("width=device-width"), "a phone's own width");
+    }
+
+    #[test]
+    fn the_viewer_is_told_the_pages_own_shape() {
+        assert!(VIEWER.contains("X-Page-Height"), "the page's height with each frame");
+        assert!(VIEWER.contains("X-Frame-Rows"), "the rows it's carried in");
+        set_page(1280, 793, 720);
+        assert_eq!(page_shape(), (1280, 793, 720));
+        set_page(0, 0, 0);
+        assert_eq!(page_shape(), (1, 1, 1));
+        set_page(FRAME_WIDTH, FRAME_HEIGHT, FRAME_HEIGHT);
     }
 
     #[test]

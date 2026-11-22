@@ -2947,6 +2947,8 @@ fn place_page(
     *placed = place;
     let westplay_shared::PagePlace { left, top, width, rows, height } = place;
     log!("the page laid out {width}x{height}, shown in the frame's {width}x{rows} from ({left}, {top})");
+    // The phone's picture is drawn at the page's own shape (mirror.rs): the truck's screen's, unsquashed.
+    crate::mirror::set_page(width, height, rows);
     let _ = stage.set_page_place(place);
     let _ = webview.place(0.0, 0.0, width, height);
     pointer.set_size(width, height);
