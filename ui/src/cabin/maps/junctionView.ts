@@ -1,8 +1,8 @@
 import type { Appearance } from '../state/appearance'
-import { NOW_WITHIN, type Guidance } from './guidance'
+import type { Guidance } from './guidance'
 import type { MapData } from './mapData'
 import { toLngLat } from './projection'
-import { type Point, type RouteNode, routeSpans, type Spans } from './route'
+import { type Point, progressOf, type RouteNode, routeSpans, type Spans } from './route'
 import { mapStyle } from './style'
 
 /**
@@ -16,6 +16,11 @@ import { mapStyle } from './style'
  * pages have no DOM). The live map (liveMap.ts) is left alone: its one map can't be in two places, and its
  * camera follows the truck.
  *
+ * The trigger is the route's real length, `junctionRealDistance`: the game's GPS measures in its own scaled
+ * distances (about 19 to 1 between towns, 3 to 1 in them), so `guidanceOf`'s distance is no use for "close"
+ * (350 of its metres are about 18 real ones: a turn came and went unseen). Everything the card says stays the
+ * game's, so it agrees with the GPS; only the showing is by the road's own metres.
+ *
  * The style is the live map's own (`mapStyle`), so the junction is drawn from the same tiles, roads and
  * buildings, with the places and signs left off (they'd need drawing, and are clutter this close).
  */
@@ -28,16 +33,22 @@ export interface JunctionView {
   bearing: number
   /** The route through the junction: from `JUNCTION_BEFORE_M` before it to `JUNCTION_AFTER_M` after. */
   line: Point[]
-  /** How far the truck is from the junction, metres (as the game counts them). */
+  /** How far the truck is from the junction as the game's GPS counts it (what the card's words say); whether
+   * the view shows is `junctionRealDistance`'s, the road's own metres. */
   distance: number
 }
 
 /** How far along the route the view starts before the junction, and ends after it, metres. */
 export const JUNCTION_BEFORE_M = 80
 export const JUNCTION_AFTER_M = 40
-/** From how far the truck is seen to be at the junction ("now", as the card says), and up to how far the
- * view opens: metres. Beyond it the card below is enough; within `NOW_WITHIN` the truck is in the junction. */
+/**
+ * How far before the junction the view shows, in real road metres — not the game's GPS distances (about 19 to
+ * 1 out of town, 3 to 1 in it: 350 of its metres are about 18 real ones, and the turn was past before the card
+ * had been seen). 350 m is a ramp's ~5 km of the GPS's, and a town turn's ~1 km.
+ */
 export const JUNCTION_MAX_M = 350
+/** Within this of the junction (real road metres) the truck is in it: the view has done its work and goes. */
+export const JUNCTION_NOW_M = 25
 /** How far back from the junction the camera's bearing is taken, metres. */
 export const JUNCTION_APPROACH_M = 20
 /** The mini map's camera: above and behind the junction, looking down the way in. */
@@ -51,12 +62,12 @@ export const JUNCTION_CASING_COLOUR = '#06232b'
 export const JUNCTION_CHEVRON_SPACING = 40
 
 /**
- * Whether the junction view shows: the next step is a turn, and it isn't here yet nor still far off
- * (`NOW_WITHIN` < distance <= `JUNCTION_MAX_M`). Without a route, arriving, or in the junction: no.
+ * Whether the junction view shows, from the turn's real road distance (`junctionRealDistance`): not while the
+ * truck is in the junction (`JUNCTION_NOW_M`), and not while the turn is still further off than
+ * `JUNCTION_MAX_M`. `null` (no route, arriving, already through it): no.
  */
-export function junctionAhead(guidance: Guidance | null): boolean {
-  if (!guidance || guidance.step.kind !== 'turn') return false
-  return guidance.distance > NOW_WITHIN && guidance.distance <= JUNCTION_MAX_M
+export function junctionAhead(distance: number | null): boolean {
+  return distance !== null && distance > JUNCTION_NOW_M && distance <= JUNCTION_MAX_M
 }
 
 /**
@@ -82,11 +93,11 @@ export interface JunctionRoute {
 }
 
 /**
- * The junction view of a route's next step (`null`: nothing to show: no route, arriving, in the junction, or
- * still too far). Straight from `guidanceOf`'s guidance, so the card and the view always agree on the turn.
+ * The junction view of a route's next step (`null`: no route, arriving, or no such node). Its showing is the
+ * caller's, by `junctionRealDistance` (and `junctionAhead`): this is the picture, not the trigger.
  */
 export function junctionViewOf(route: JunctionRoute, guidance: Guidance | null): JunctionView | null {
-  if (!junctionAhead(guidance) || !guidance || guidance.step.kind !== 'turn') return null
+  if (!guidance || guidance.step.kind !== 'turn') return null
   const node = guidance.step.maneuver.node
   const centre = route.nodes[node]
   if (!centre) return null
@@ -101,6 +112,15 @@ export function junctionViewOf(route: JunctionRoute, guidance: Guidance | null):
     ? bearingOf(entry, slice.line[slice.centre])
     : bearingOfDirection(centre.forward[0], centre.forward[1])
   return { center, bearing, line: slice.line, distance: guidance.distance }
+}
+
+/**
+ * The way the truck faces, on the game's ground (x east, z south), from its heading: turns, 0 = north and
+ * rising counter-clockwise (0.25 west, 0.5 south, 0.75 east: the game's own, `Telemetry.heading`).
+ */
+export function facingOfHeading(heading: number): Point {
+  const radians = 2 * Math.PI * heading
+  return [-Math.sin(radians), -Math.cos(radians)]
 }
 
 /** How many nodes either side of the junction the spans are made from: more than the route's 80 m before and
@@ -119,6 +139,116 @@ function junctionSpans(route: JunctionRoute, node: number): { spans: Spans; at: 
   const shifts = new Map<number, number>()
   for (const [key, value] of route.shifts) if (key >= first && key <= last) shifts.set(key - first, value)
   return { spans: routeSpans(nodes, paths, shifts), at: node - first }
+}
+
+/** How many nodes past the junction the real-distance slice runs: enough to hold the way in and the junction,
+ * with the node ahead of the truck for `progressOf`. */
+const JUNCTION_SLICE_AFTER = 6
+
+/** The route around the junction, as `junctionRealDistance` needs it: the truck's own node back from the
+ * junction with `JUNCTION_SLICE_AFTER` nodes past it, its line, how far along it each point is, and where the
+ * junction is on it. */
+interface RealSlice {
+  route: JunctionRoute
+  node: number
+  next: number
+  spans: Spans
+  line: Point[]
+  /** Arc length from the slice's first point to each of its points. */
+  lengths: number[]
+  /** Where each span starts among `line`'s points. */
+  spanStart: number[]
+  /** The junction's point among `line`'s points, and the arc length to it. */
+  centre: number
+  centreLength: number
+  /** The slice's first node of the route. */
+  first: number
+}
+
+/** The slice last built: the route around a junction stays the same while the truck drives it. */
+let realSlice: RealSlice | null = null
+
+/**
+ * The route from the truck's node (or the junction's, if that's behind it) to `JUNCTION_SLICE_AFTER` nodes
+ * past the junction, kept from one call to the next: at telemetry's rate only the truck's own progress
+ * changes, and rebuilding the spans 20 times a second for one turn would be wasted work.
+ */
+function realSliceFor(route: JunctionRoute, node: number, next: number): RealSlice | null {
+  if (realSlice && realSlice.route === route && realSlice.node === node && realSlice.next === next) return realSlice
+  const first = Math.max(0, Math.min(next - 1, node))
+  const last = Math.min(route.nodes.length - 1, node + JUNCTION_SLICE_AFTER)
+  const nodes = route.nodes.slice(first, last + 1)
+  if (nodes.length < 2) return null
+  // The junction lanes and the across-shifts are keyed by the route's own nodes: their slice's own.
+  const paths = new Map<number, Point[]>()
+  for (const [key, value] of route.paths) if (key >= first && key < last) paths.set(key - first, value)
+  const shifts = new Map<number, number>()
+  for (const [key, value] of route.shifts) if (key >= first && key <= last) shifts.set(key - first, value)
+  const spans = routeSpans(nodes, paths, shifts)
+  const line = flatten(spans)
+  if (line.length < 2) return null
+  const lengths = [0]
+  for (let at = 1; at < line.length; at++) lengths.push(lengths[at - 1] + lengthOf(line[at - 1], line[at]))
+  const spanStart: number[] = []
+  let points = 0
+  for (const span of spans) {
+    spanStart.push(points)
+    points += Math.max(0, span.length - 1)
+  }
+  // The junction's own point: the start of its span, or the line's last point when it's the route's last node.
+  const local = node - first
+  const centre = Math.min(local < spanStart.length ? spanStart[local] : line.length - 1, line.length - 1)
+  const slice: RealSlice = {
+    route,
+    node,
+    next,
+    spans,
+    line,
+    lengths,
+    spanStart,
+    centre,
+    centreLength: lengths[centre],
+    first,
+  }
+  realSlice = slice
+  return slice
+}
+
+/**
+ * How far the truck is from the next turn's junction along the road, in real metres — never the game's GPS
+ * distances, which are about 19 to 1 between towns and 3 to 1 in them. `null` without a turn, off the route,
+ * or already through the junction.
+ *
+ * The truck is placed on the route from its own node to `JUNCTION_SLICE_AFTER` past the junction (`progressOf`,
+ * which knows the way the truck faces: a road with both directions on it), and measured to the junction's own
+ * node. `next` is the node ahead of the truck (live's `routeNext`) the slice and `progressOf` start from. A
+ * truck whose straight line to the junction is already past `JUNCTION_MAX_M` can't be nearer by road (a road
+ * is never shorter than the straight line), so no spans are built then and that lower bound is returned:
+ * `junctionAhead` says no either way, and turns still kilometres off cost nothing.
+ */
+export function junctionRealDistance(
+  route: JunctionRoute,
+  guidance: Guidance | null,
+  truck: [number, number],
+  facing?: [number, number],
+  next = 0,
+): number | null {
+  if (!guidance || guidance.step.kind !== 'turn') return null
+  const node = guidance.step.maneuver.node
+  const centreNode = route.nodes[node]
+  if (!centreNode) return null
+  const [cx, cz] = centreNode.position
+  const straight = Math.hypot(cx - truck[0], cz - truck[1])
+  if (straight > JUNCTION_MAX_M) return straight
+  const slice = realSliceFor(route, node, next)
+  if (!slice) return null
+  const progress = progressOf(slice.spans, Math.max(0, next - slice.first), truck, facing)
+  if (!progress) return null
+  const at = Math.min(slice.spanStart[progress.span] + progress.index, slice.line.length - 1)
+  const travelled = slice.lengths[at] + lengthOf(slice.line[at], progress.at)
+  const distance = slice.centreLength - travelled
+  // Through the junction (its point behind the truck): the view has nothing left to show.
+  return distance < 0 ? null : distance
 }
 
 /** The route through the junction `node`: a slice of the spans, and where the junction is in that slice. */

@@ -9,7 +9,9 @@ import { guidanceOf, type Guidance } from '../maps/guidance'
 import {
   attachJunctionMap,
   detachJunctionMap,
+  facingOfHeading,
   junctionAhead,
+  junctionRealDistance,
   junctionViewOf,
   showJunction,
 } from '../maps/junctionView'
@@ -17,8 +19,8 @@ import { useMapData } from '../maps/mapData'
 
 /**
  * The junction view: the next turn, zoomed in on a small 3D map (junctionView.ts), with the route through the
- * junction and arrows along it. The Dashboard's top widget; nothing at all without a turn close ahead (in
- * `JUNCTION_MAX_M`), so it takes no room but for those few hundred metres before each turn.
+ * junction and arrows along it. The Dashboard's top widget; nothing at all without a turn close ahead, so it
+ * takes no room but for the few hundred metres (the road's own: `JUNCTION_MAX_M`) before each turn.
  *
  * Its map is a second MapLibre map of its own (the live map follows the truck, and one map can't be in two
  * places): made the first time the view shows, hidden while there's nothing to show, and taken down with the
@@ -26,24 +28,50 @@ import { useMapData } from '../maps/mapData'
  * to it with every turn, and the camera jumps there rather than easing (a press, not a drive).
  */
 
-/** What the card shows, as values that stay put while nothing it draws changes: whether at all, and how far
- * (whole 10 m, so telemetry's 20 a second don't redraw the card). */
+/** Nothing to show: no route, no truck's place yet, arriving, far off or already through the turn. */
+const CLOSED = { show: false, real: 0, step: '' }
+
+/**
+ * What the card shows, as values that stay put while nothing it draws changes: whether at all, the real road
+ * distance it opened at (whole 10 m, so telemetry's 20 a second don't redraw the card), and which turn. The
+ * trigger is the road's own metres (`junctionRealDistance`), not the GPS's scaled distances: those put a town
+ * turn a few seconds off at best (the GPS counts about 3 or 19 of its metres to the road's one).
+ */
 function selectJunction(state: LiveState) {
   const { route, routeNext, telemetry } = state
-  const guidance = route
-    ? guidanceOf(route.distances, route.maneuvers, routeNext, telemetry?.navigationDistance ?? 0)
-    : null
-  if (!guidance || !junctionAhead(guidance)) return { show: false, distance: 0, step: '' }
-  const step = guidance.step.kind === 'turn' ? `${guidance.step.maneuver.node}:${guidance.step.maneuver.turn}` : ''
-  return { show: true, distance: Math.round(guidance.distance / 10) * 10, step }
+  if (!route || !telemetry) return CLOSED
+  const guidance = guidanceOf(route.distances, route.maneuvers, routeNext, telemetry.navigationDistance)
+  if (!guidance || guidance.step.kind !== 'turn') return CLOSED
+  const real = junctionRealDistance(
+    route,
+    guidance,
+    [telemetry.x, telemetry.z],
+    facingOfHeading(telemetry.heading),
+    routeNext,
+  )
+  if (real === null || !junctionAhead(real)) return CLOSED
+  const step = `${guidance.step.maneuver.node}:${guidance.step.maneuver.turn}`
+  return { show: true, real: Math.round(real / 10) * 10, step }
+}
+
+/** How far the GPS says the turn is, worded as the turn-by-turn card words it (its game distances, so the cab
+ * and the GPS agree). The words change only when the figure does, so telemetry's 20 a second redraw nothing. */
+function JunctionDistance() {
+  const text = useText()
+  const words = useLive((state) => {
+    const route = state.route
+    const guidance = route
+      ? guidanceOf(route.distances, route.maneuvers, state.routeNext, state.telemetry?.navigationDistance ?? 0)
+      : null
+    return guidance ? formatTripDistance(guidance.distance, text.decimal, state.mph) : ''
+  })
+  return words ? <span className="junction-distance">{words}</span> : null
 }
 
 /** The junction ahead on the Dashboard (`null` before a route, or when the next turn is far or already here). */
 export function JunctionView() {
-  const text = useText()
-  const { show, distance, step } = useLive(useShallow(selectJunction))
+  const { show, step } = useLive(useShallow(selectJunction))
   const route = useLive((state) => state.route)
-  const mph = useLive((state) => state.mph)
   const data = useMapData()
   const { appearance } = useLook()
   const host = useRef<HTMLDivElement>(null)
@@ -64,8 +92,8 @@ export function JunctionView() {
   }, [shown, data, appearance])
 
   // The junction to show: a new turn, a new route, a new map (the map is made again with its data), or the
-  // card coming and going. The distance is the one it opens with: the card's own badge below follows it, and
-  // the route's line doesn't change on the way in.
+  // card coming and going. The distance is the one it opens with: the card's own badge below follows the
+  // GPS's figure, and the route's line doesn't change on the way in.
   useEffect(() => {
     if (!show || !data) {
       showJunction(null)
@@ -85,9 +113,8 @@ export function JunctionView() {
     <div className={`widget-slot junction-slot${visible ? ' open' : ''}`} aria-hidden={!visible}>
       <div className="widget junction" role="group" aria-label="Junction">
         <div ref={host} className="junction-map" aria-hidden />
-        {visible && <span className="junction-distance">{formatTripDistance(distance, text.decimal, mph)}</span>}
+        {visible && <JunctionDistance />}
       </div>
     </div>
   )
 }
-

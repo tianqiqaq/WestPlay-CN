@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { type Guidance, NOW_WITHIN } from './guidance'
+import type { Guidance, TurnKind } from './guidance'
 import {
   bearingOfDirection,
+  facingOfHeading,
   JUNCTION_AFTER_M,
   JUNCTION_BEFORE_M,
   JUNCTION_CHEVRON_SPACING,
   JUNCTION_MAX_M,
+  JUNCTION_NOW_M,
   junctionAhead,
+  junctionRealDistance,
   junctionViewOf,
 } from './junctionView'
 import type { Point, RouteNode } from './route'
@@ -28,9 +31,10 @@ function routeOf(positions: Point[]): {
   return { nodes, paths: new Map(), shifts: new Map() }
 }
 
-/** A turn at `node`, `distance` metres ahead. */
-function turn(node: number, distance: number): Guidance {
-  return { step: { kind: 'turn', maneuver: { node, turn: 'left', angle: -90, exit: null } }, distance, then: null }
+/** A turn at `node`, `distance` of the GPS's metres ahead (its game distances, about 19 or 3 of them to the
+ * road's one). */
+function turn(node: number, distance: number, kind: TurnKind = 'left'): Guidance {
+  return { step: { kind: 'turn', maneuver: { node, turn: kind, angle: -90, exit: null } }, distance, then: null }
 }
 
 /** The route's end. */
@@ -38,46 +42,121 @@ function arrive(distance: number): Guidance {
   return { step: { kind: 'arrive' }, distance, then: null }
 }
 
-/** The entry is due north from the junction, then east from the west: a right angle, entered from the south. */
-const NORTHBOUND = routeOf([
-  [0, 80],
-  [0, 0],
-  [0, -80],
-])
+/** A straight route heading north: node `index` at z = 400 - 8 * index, from z = 400 to z = -200. */
+const STRAIGHT_Z = (index: number) => 400 - index * 8
+const STRAIGHT = routeOf(Array.from({ length: 76 }, (_, index) => [0, STRAIGHT_Z(index)]))
+/** The junction on `STRAIGHT`: z = 0. */
+const JUNCTION = 50
+
+/** The node ahead of a truck at `z` on `STRAIGHT` (z falls as the route runs north). */
+function aheadOf(z: number): number {
+  return Math.max(0, Math.min(75, Math.ceil((400 - z) / 8)))
+}
+
+/** The bearing difference from due north (0), for assertions that don't care about the wrap. */
+function northDelta(bearing: number): number {
+  return Math.abs(((bearing + 540) % 360) - 180)
+}
 
 describe('junctionAhead', () => {
-  it('shows for a turn within reach, and only then', () => {
-    expect(junctionAhead(turn(1, JUNCTION_MAX_M))).toBe(true)
-    expect(junctionAhead(turn(1, JUNCTION_MAX_M + 1))).toBe(false)
-    expect(junctionAhead(turn(1, NOW_WITHIN + 1))).toBe(true)
-    // In the junction already ("now" on the card): the view gets out of the way.
-    expect(junctionAhead(turn(1, NOW_WITHIN))).toBe(false)
-    expect(junctionAhead(turn(1, 0))).toBe(false)
-    expect(junctionAhead(turn(1, -10))).toBe(false)
+  it('shows from the real road distance: past the junction, and short of the limit', () => {
+    expect(junctionAhead(JUNCTION_MAX_M)).toBe(true)
+    expect(junctionAhead(JUNCTION_MAX_M + 1)).toBe(false)
+    expect(junctionAhead(JUNCTION_NOW_M + 1)).toBe(true)
+    // In the junction already: the view gets out of the way.
+    expect(junctionAhead(JUNCTION_NOW_M)).toBe(false)
+    expect(junctionAhead(0)).toBe(false)
+    expect(junctionAhead(-10)).toBe(false)
   })
 
-  it('shows nothing without a route, and nothing once arrived', () => {
+  it('shows nothing where there is no distance at all (no route, arriving, or no truck place yet)', () => {
     expect(junctionAhead(null)).toBe(false)
-    expect(junctionAhead(arrive(100))).toBe(false)
+  })
+})
+
+describe('junctionRealDistance', () => {
+  it('measures the road, however large the GPS makes the turn sound', () => {
+    // 300 m of road before the junction, which the GPS calls 5.7 km (out of town it counts ~19 of its metres
+    // to the road's one): this is what the 350-m game-distance window missed.
+    const truck: [number, number] = [0, 300]
+    const real = junctionRealDistance(STRAIGHT, turn(JUNCTION, 5700), truck, facingOfHeading(0.5), aheadOf(300))
+    expect(real).not.toBeNull()
+    expect(real ?? 0).toBeCloseTo(300, 1)
+    expect(junctionAhead(real)).toBe(true)
+  })
+
+  it('hides a turn beyond the limit of the road, however close the GPS says it is', () => {
+    // 400 m of road before the junction (the GPS calls it 1 km).
+    const truck: [number, number] = [0, 400]
+    const real = junctionRealDistance(STRAIGHT, turn(JUNCTION, 1000), truck, facingOfHeading(0.5), aheadOf(400))
+    expect(real).not.toBeNull()
+    expect(real ?? 0).toBeGreaterThanOrEqual(400)
+    expect(junctionAhead(real)).toBe(false)
+  })
+
+  it('shows ramps and keeps: exits and keep-lefts are turns like any other', () => {
+    const truck: [number, number] = [0, 300]
+    for (const kind of ['exit-right', 'exit-left', 'keep-right', 'keep-left'] as const) {
+      const real = junctionRealDistance(STRAIGHT, turn(JUNCTION, 4800, kind), truck, facingOfHeading(0.5), aheadOf(300))
+      expect(real, kind).not.toBeNull()
+      expect(junctionAhead(real), kind).toBe(true)
+    }
+  })
+
+  it('hides the turn once the truck is through the junction', () => {
+    const truck: [number, number] = [0, -50]
+    const real = junctionRealDistance(STRAIGHT, turn(JUNCTION, 0), truck, facingOfHeading(0.5), aheadOf(-50))
+    expect(real).toBeNull()
+  })
+
+  it('shows nothing without a turn', () => {
+    const truck: [number, number] = [0, 300]
+    expect(junctionRealDistance(STRAIGHT, null, truck, facingOfHeading(0.5), aheadOf(300))).toBeNull()
+    expect(junctionRealDistance(STRAIGHT, arrive(5700), truck, facingOfHeading(0.5), aheadOf(300))).toBeNull()
+    // A turn on a node the route doesn't have.
+    expect(junctionRealDistance(routeOf([[0, 0]]), turn(1, 100), truck, facingOfHeading(0.5), 0)).toBeNull()
+  })
+
+  it('follows the route around its curves, not the straight line to the junction', () => {
+    // East 100 m, then north 100 m to the junction: about 200 m of road (the game's own curve into the turn
+    // adds a few), but only ~141 m as the crow flies.
+    const route = routeOf([[-100, 100], [0, 100], [0, 0]])
+    const truck: [number, number] = [-100, 100]
+    const real = junctionRealDistance(route, turn(2, 3800), truck, facingOfHeading(0.75), 1)
+    expect(real ?? 0).toBeGreaterThan(190)
+    expect(real ?? 0).toBeLessThan(215)
+    expect(junctionAhead(real)).toBe(true)
+  })
+})
+
+describe('facingOfHeading', () => {
+  it('turns the game\'s heading into a direction on the ground (turns, 0 = north, counter-clockwise)', () => {
+    const near = (actual: Point, dx: number, dz: number) => {
+      expect(actual[0]).toBeCloseTo(dx, 6)
+      expect(actual[1]).toBeCloseTo(dz, 6)
+    }
+    near(facingOfHeading(0), 0, -1)
+    near(facingOfHeading(0.25), -1, 0)
+    near(facingOfHeading(0.5), 0, 1)
+    near(facingOfHeading(0.75), 1, 0)
   })
 })
 
 describe('junctionViewOf', () => {
-  it('shows nothing without a turn in reach', () => {
-    expect(junctionViewOf(NORTHBOUND, null)).toBeNull()
-    expect(junctionViewOf(NORTHBOUND, arrive(100))).toBeNull()
-    expect(junctionViewOf(NORTHBOUND, turn(1, JUNCTION_MAX_M + 1))).toBeNull()
-    expect(junctionViewOf(NORTHBOUND, turn(1, NOW_WITHIN))).toBeNull()
-  })
-
-  it('shows nothing without a route to show', () => {
+  it('shows no picture without a turn or a node to show', () => {
+    expect(junctionViewOf(STRAIGHT, null)).toBeNull()
+    expect(junctionViewOf(STRAIGHT, arrive(100))).toBeNull()
     expect(junctionViewOf({ nodes: [], paths: new Map(), shifts: new Map() }, turn(1, 100))).toBeNull()
     // The turn's node isn't one the route has.
     expect(junctionViewOf(routeOf([[0, 0]]), turn(1, 100))).toBeNull()
   })
 
+  it('is drawn however far the GPS says the turn is: its showing is the real distance\'s', () => {
+    expect(junctionViewOf(STRAIGHT, turn(JUNCTION, 5700))).not.toBeNull()
+  })
+
   it('centres on the junction, with the route 80 m before it and 40 m after', () => {
-    const view = junctionViewOf(NORTHBOUND, turn(1, 120))
+    const view = junctionViewOf(STRAIGHT, turn(JUNCTION, 120))
     expect(view).not.toBeNull()
     if (!view) return
     expect(view.center).toEqual([0, 0])
@@ -96,15 +175,7 @@ describe('junctionViewOf', () => {
   })
 
   it('cuts the ends short where the route has less before or after than asked', () => {
-    // 30 m before the junction, 30 after: the slice is what the route has.
-    const view = junctionViewOf(
-      routeOf([
-        [0, 30],
-        [0, 0],
-        [0, -30],
-      ]),
-      turn(1, 120),
-    )
+    const view = junctionViewOf(routeOf([[0, 30], [0, 0], [0, -30]]), turn(1, 120))
     expect(view).not.toBeNull()
     if (!view) return
     expect(view.line[0][1]).toBeCloseTo(30, 0)
@@ -128,7 +199,7 @@ describe('junctionViewOf', () => {
   })
 
   it('keeps the whole slice within the distances it was asked for', () => {
-    const view = junctionViewOf(NORTHBOUND, turn(1, 200))
+    const view = junctionViewOf(STRAIGHT, turn(JUNCTION, 200))
     if (!view) throw new Error('no view')
     for (const [x, z] of view.line) {
       expect(Math.abs(x)).toBeLessThan(0.01)
@@ -138,16 +209,13 @@ describe('junctionViewOf', () => {
   })
 
   it('takes its slice from a long route without building the whole route', () => {
-    // A 100-node route heading north: node 50 is the junction at z = 0, and the view's slice is the 80 m
-    // before it and 40 m after, as on the three-node routes.
-    const positions: Point[] = Array.from({ length: 101 }, (_, index) => [0, 400 - index * 8])
-    const view = junctionViewOf(routeOf(positions), turn(50, 200))
+    const positions: Point[] = Array.from({ length: 101 }, (_, index) => [0, STRAIGHT_Z(index)])
+    const view = junctionViewOf(routeOf(positions), turn(JUNCTION, 200))
     if (!view) throw new Error('no view')
     expect(view.center).toEqual([0, 0])
     expect(view.line[0][1]).toBeCloseTo(JUNCTION_BEFORE_M, 0)
     expect(view.line[view.line.length - 1][1]).toBeCloseTo(-JUNCTION_AFTER_M, 0)
-    const delta = Math.abs(((view.bearing + 540) % 360) - 180)
-    expect(delta).toBeLessThan(1)
+    expect(northDelta(view.bearing)).toBeLessThan(1)
   })
 
   it('draws the lanes the host found at the junction', () => {
@@ -165,8 +233,7 @@ describe('junctionViewOf', () => {
     route.shifts.set(1, 5)
     const view = junctionViewOf(route, turn(1, 120))
     if (!view) throw new Error('no view')
-    const delta = Math.abs(((view.bearing + 540) % 360) - 180)
-    expect(delta).toBeLessThan(5)
+    expect(northDelta(view.bearing)).toBeLessThan(5)
   })
 })
 
@@ -183,12 +250,13 @@ describe('bearingOfDirection', () => {
   })
 })
 
-describe('the junction view\'s constants', () => {
-  it('keeps the arrows a readable distance apart, and the view ahead of the junction', () => {
+describe("the junction view's constants", () => {
+  it('keeps the arrows a readable distance apart, and the view measured in the road\'s own metres', () => {
     expect(JUNCTION_CHEVRON_SPACING).toBeGreaterThanOrEqual(20)
     expect(JUNCTION_CHEVRON_SPACING).toBeLessThanOrEqual(80)
     expect(JUNCTION_BEFORE_M).toBeGreaterThanOrEqual(40)
     expect(JUNCTION_AFTER_M).toBeGreaterThan(0)
-    expect(JUNCTION_MAX_M).toBeGreaterThan(NOW_WITHIN)
+    expect(JUNCTION_NOW_M).toBeGreaterThan(0)
+    expect(JUNCTION_MAX_M).toBeGreaterThan(JUNCTION_NOW_M)
   })
 })
