@@ -106,17 +106,20 @@
   margin-bottom: 0;
 }
 
-/* The junction view (JunctionView.tsx): the turn ahead zoomed in, its own 3D map filling the card, and
-   how far the turn is in the corner. In a slot as the turn-by-turn card is: room only while there's a turn
-   close ahead (`JUNCTION_MAX_M`). No glass under it: the map is the whole card, dark until its tiles come. */
+/* The junction view (JunctionView.tsx): the turn ahead zoomed in, its own 3D map filling the panel, and how far
+   the turn is in the corner. In the map's own split (map.css): half the map's height while there's a turn close
+   ahead (`JUNCTION_MAX_M`) to `JUNCTION_PAST_M` past it. No glass under it: the map is the whole panel, dark
+   until its tiles come. */
 .junction {
   position: relative;
-  padding: 0;
+  flex: 1;
+  min-height: 0;
+  border-radius: var(--panel-radius);
   overflow: hidden;
   background: #0b0b0d;
 }
 
-/* The map fills the card: MapLibre sizes its canvas to this box (and to the card as it grows). */
+/* The map fills the panel: MapLibre sizes its canvas to this box (and to the panel as it grows). */
 .junction .junction-map {
   position: absolute;
   inset: 0;
@@ -124,13 +127,13 @@
 
 .junction .junction-distance {
   position: absolute;
-  right: 14px;
-  bottom: 12px;
-  padding: 3px 14px 4px;
+  right: 22px;
+  bottom: 18px;
+  padding: 4px 18px 5px;
   border-radius: 999px;
   background: rgb(0 0 0 / 0.45);
   color: #fff;
-  font-size: calc(22px * var(--text-scale, 1));
+  font-size: calc(30px * var(--text-scale, 1));
   font-weight: 650;
   font-variant-numeric: tabular-nums;
   pointer-events: none;
@@ -478,12 +481,5 @@
   .guidance-widget .guidance-then .maneuver-glyph {
     width: 22px;
     height: 22px;
-  }
-
-  /* The junction's distance, a size down with the widgets' own text. */
-  .junction .junction-distance {
-    right: 10px;
-    bottom: 8px;
-    font-size: calc(18px * var(--text-scale, 1));
   }
 }

@@ -1,6 +1,6 @@
 import { startTransition, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useAppIcon } from '../state/hooks'
-import { MapView } from '../dashboard/MapView'
+import { MapSplit } from '../dashboard/MapSplit'
 import { type AppId, APPS } from '../state/apps'
 import { useLaunchStyle, whenTransitionEnds } from '../state/launch'
 import { CalendarApp } from './calendar/CalendarApp'
@@ -78,7 +78,7 @@ function AppContent({ app }: { app: AppId }) {
     case 'maps':
       return (
         <section className="app-panel maps-app" aria-label={text.apps.maps}>
-          <MapView interactive />
+          <MapSplit interactive />
         </section>
       )
     case 'music':

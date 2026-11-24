@@ -2,8 +2,7 @@ import { useEffect, useState } from 'react'
 import { GuidanceCard } from '../maps/GuidanceCard'
 import { useCabin } from '../state/store'
 import { useMapGrown } from './idle'
-import { JunctionView } from './JunctionView'
-import { MapView } from './MapView'
+import { MapSplit } from './MapSplit'
 import { useAnyWidget } from './widgetState'
 import { DestinationWidget, NowPlayingWidget, WeatherWidget } from './widgets'
 import './dashboard.css'
@@ -37,9 +36,8 @@ export function Dashboard() {
   if (growth === 'grown' || growth === 'shrinking') classes.push('map-moving')
   return (
     <section className={classes.join(' ')} aria-label="Dashboard">
-      <MapView />
+      <MapSplit />
       <div className="widgets" hidden={!anyWidget}>
-        <JunctionView />
         <GuidanceCard variant="widget" />
         <NowPlayingWidget />
         <DestinationWidget />

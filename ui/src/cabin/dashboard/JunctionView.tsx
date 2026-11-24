@@ -3,56 +3,24 @@ import { useShallow } from 'zustand/react/shallow'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { formatTripDistance } from '../../shared/format'
 import { useLook } from '../state/hooks'
-import { type LiveState, useLive } from '../state/store'
+import { useLive } from '../state/store'
 import { useText } from '../state/text'
-import { guidanceOf, type Guidance } from '../maps/guidance'
-import {
-  attachJunctionMap,
-  detachJunctionMap,
-  facingOfHeading,
-  junctionAhead,
-  junctionRealDistance,
-  junctionViewOf,
-  showJunction,
-} from '../maps/junctionView'
+import { guidanceOf } from '../maps/guidance'
+import { attachJunctionMap, junctionViewOf, showJunction } from '../maps/junctionView'
 import { useMapData } from '../maps/mapData'
+import { junctionCardOf } from './junctionCard'
 
 /**
  * The junction view: the next turn, zoomed in on a small 3D map (junctionView.ts), with the route through the
- * junction and arrows along it. The Dashboard's top widget; nothing at all without a turn close ahead, so it
- * takes no room but for the few hundred metres (the road's own: `JUNCTION_MAX_M`) before each turn.
+ * junction and arrows along it. It fills the top half of the map's split (MapSplit.tsx), which is closed while
+ * there's no turn close ahead — so it takes no room but for the few hundred metres (the road's own:
+ * `JUNCTION_MAX_M`) before each turn and the eighty after it.
  *
  * Its map is a second MapLibre map of its own (the live map follows the truck, and one map can't be in two
- * places): made the first time the view shows, hidden while there's nothing to show, and taken down with the
- * Dashboard (its WebGL context and tiles go with it). The map is the junction's; the route's line is handed
- * to it with every turn, and the camera jumps there rather than easing (a press, not a drive).
+ * places): made the first time the view shows, hidden while there's nothing to show, and taken down when it
+ * leaves the screen (its WebGL context and tiles go with it). The map is the junction's; the route's line is
+ * handed to it with every turn, and the camera jumps there rather than easing (a press, not a drive).
  */
-
-/** Nothing to show: no route, no truck's place yet, arriving, far off or already through the turn. */
-const CLOSED = { show: false, real: 0, step: '' }
-
-/**
- * What the card shows, as values that stay put while nothing it draws changes: whether at all, the real road
- * distance it opened at (whole 10 m, so telemetry's 20 a second don't redraw the card), and which turn. The
- * trigger is the road's own metres (`junctionRealDistance`), not the GPS's scaled distances: those put a town
- * turn a few seconds off at best (the GPS counts about 3 or 19 of its metres to the road's one).
- */
-function selectJunction(state: LiveState) {
-  const { route, routeNext, telemetry } = state
-  if (!route || !telemetry) return CLOSED
-  const guidance = guidanceOf(route.distances, route.maneuvers, routeNext, telemetry.navigationDistance)
-  if (!guidance || guidance.step.kind !== 'turn') return CLOSED
-  const real = junctionRealDistance(
-    route,
-    guidance,
-    [telemetry.x, telemetry.z],
-    facingOfHeading(telemetry.heading),
-    routeNext,
-  )
-  if (real === null || !junctionAhead(real)) return CLOSED
-  const step = `${guidance.step.maneuver.node}:${guidance.step.maneuver.turn}`
-  return { show: true, real: Math.round(real / 10) * 10, step }
-}
 
 /** How far the GPS says the turn is, worded as the turn-by-turn card words it (its game distances, so the cab
  * and the GPS agree). The words change only when the figure does, so telemetry's 20 a second redraw nothing. */
@@ -68,9 +36,9 @@ function JunctionDistance() {
   return words ? <span className="junction-distance">{words}</span> : null
 }
 
-/** The junction ahead on the Dashboard (`null` before a route, or when the next turn is far or already here). */
+/** The junction ahead, in the map's split (`null` outside its panel: no route, or the turn far or past). */
 export function JunctionView() {
-  const { show, step } = useLive(useShallow(selectJunction))
+  const { show, step, maneuver, following } = useLive(useShallow(junctionCardOf))
   const route = useLive((state) => state.route)
   const data = useMapData()
   const { appearance } = useLook()
@@ -87,33 +55,28 @@ export function JunctionView() {
   useEffect(() => {
     if (!shown || !data || !host.current) return
     const element = host.current
-    attachJunctionMap(element, { appearance, data })
-    return () => detachJunctionMap({ remove: true })
+    return attachJunctionMap(element, { appearance, data })
   }, [shown, data, appearance])
 
   // The junction to show: a new turn, a new route, a new map (the map is made again with its data), or the
-  // card coming and going. The distance is the one it opens with: the card's own badge below follows the
-  // GPS's figure, and the route's line doesn't change on the way in.
+  // panel coming and going. The distance is the one it opens with: the badge follows the GPS's figure, and the
+  // route's line doesn't change on the way in.
   useEffect(() => {
-    if (!show || !data) {
+    if (!show || !maneuver || !route || !data) {
       showJunction(null)
       return
     }
-    const live = useLive.getState()
-    const guidance: Guidance | null = route
-      ? guidanceOf(route.distances, route.maneuvers, live.routeNext, live.telemetry?.navigationDistance ?? 0)
-      : null
-    showJunction(route && guidance ? junctionViewOf(route, guidance) : null)
-  }, [show, route, step, appearance, data])
+    showJunction(junctionViewOf(route, { step: { kind: 'turn', maneuver }, distance: 0, then: null }))
+  }, [show, maneuver, route, step, appearance, data])
 
   // The last card closed: nothing of the junction is wanted any more.
   useEffect(() => () => showJunction(null), [])
 
   return (
-    <div className={`widget-slot junction-slot${visible ? ' open' : ''}`} aria-hidden={!visible}>
-      <div className="widget junction" role="group" aria-label="Junction">
+    <div className="junction-slot" aria-hidden={!visible}>
+      <div className="junction" role="group" aria-label="Junction">
         <div ref={host} className="junction-map" aria-hidden />
-        {visible && <JunctionDistance />}
+        {visible && following && <JunctionDistance />}
       </div>
     </div>
   )

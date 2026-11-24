@@ -1,5 +1,5 @@
 import type { Appearance } from '../state/appearance'
-import type { Guidance } from './guidance'
+import type { Guidance, Maneuver } from './guidance'
 import type { MapData } from './mapData'
 import { toLngLat } from './projection'
 import { type Point, progressOf, type RouteNode, routeSpans, type Spans } from './route'
@@ -47,27 +47,30 @@ export const JUNCTION_AFTER_M = 40
  * had been seen). 350 m is a ramp's ~5 km of the GPS's, and a town turn's ~1 km.
  */
 export const JUNCTION_MAX_M = 350
-/** Within this of the junction (real road metres) the truck is in it: the view has done its work and goes. */
-export const JUNCTION_NOW_M = 25
+/**
+ * How far past the junction the view stays, real road metres: through the turn, not until the GPS moves on to
+ * the next one (which happens a node or two after the junction, while the truck is still turning).
+ */
+export const JUNCTION_PAST_M = 80
 /** How far back from the junction the camera's bearing is taken, metres. */
 export const JUNCTION_APPROACH_M = 20
 /** The mini map's camera: above and behind the junction, looking down the way in. */
-export const JUNCTION_ZOOM = 17.2
+export const JUNCTION_ZOOM = 16.8
 export const JUNCTION_PITCH = 55
 /** The dimming above the map's ground, and the route's colours over it. */
 export const JUNCTION_DIM_OPACITY = 0.35
 export const JUNCTION_ROUTE_COLOUR = '#38e1ff'
 export const JUNCTION_CASING_COLOUR = '#06232b'
 /** Between two arrows along the route, pixels. */
-export const JUNCTION_CHEVRON_SPACING = 40
+export const JUNCTION_CHEVRON_SPACING = 56
 
 /**
- * Whether the junction view shows, from the turn's real road distance (`junctionRealDistance`): not while the
- * truck is in the junction (`JUNCTION_NOW_M`), and not while the turn is still further off than
- * `JUNCTION_MAX_M`. `null` (no route, arriving, already through it): no.
+ * Whether the junction view shows, from the turn's real road distance (`junctionRealDistance`, signed: positive
+ * before the junction, negative past it): from `JUNCTION_MAX_M` before it to `JUNCTION_PAST_M` after it — the
+ * truck in the junction and still turning included. `null` (no route, arriving, nothing to measure): no.
  */
 export function junctionAhead(distance: number | null): boolean {
-  return distance !== null && distance > JUNCTION_NOW_M && distance <= JUNCTION_MAX_M
+  return distance !== null && distance <= JUNCTION_MAX_M && distance >= -JUNCTION_PAST_M
 }
 
 /**
@@ -141,13 +144,13 @@ function junctionSpans(route: JunctionRoute, node: number): { spans: Spans; at: 
   return { spans: routeSpans(nodes, paths, shifts), at: node - first }
 }
 
-/** How many nodes past the junction the real-distance slice runs: enough to hold the way in and the junction,
- * with the node ahead of the truck for `progressOf`. */
-const JUNCTION_SLICE_AFTER = 6
+/** How far past the junction the real-distance slice runs (real metres), so the truck is still on it at
+ * `JUNCTION_PAST_M`, and the most nodes it runs past it (a bound on what one call builds). */
+const JUNCTION_SLICE_AFTER_M = JUNCTION_PAST_M + 40
+const JUNCTION_SLICE_AFTER_NODES = 48
 
 /** The route around the junction, as `junctionRealDistance` needs it: the truck's own node back from the
- * junction with `JUNCTION_SLICE_AFTER` nodes past it, its line, how far along it each point is, and where the
- * junction is on it. */
+ * junction with the way past it, its line, how far along it each point is, and where the junction is on it. */
 interface RealSlice {
   route: JunctionRoute
   node: number
@@ -169,14 +172,21 @@ interface RealSlice {
 let realSlice: RealSlice | null = null
 
 /**
- * The route from the truck's node (or the junction's, if that's behind it) to `JUNCTION_SLICE_AFTER` nodes
- * past the junction, kept from one call to the next: at telemetry's rate only the truck's own progress
- * changes, and rebuilding the spans 20 times a second for one turn would be wasted work.
+ * The route from the truck's node (or the junction's, if that's behind it) to `JUNCTION_SLICE_AFTER_M` past the
+ * junction, kept from one call to the next: at telemetry's rate only the truck's own progress changes, and
+ * rebuilding the spans 20 times a second for one turn would be wasted work.
  */
 function realSliceFor(route: JunctionRoute, node: number, next: number): RealSlice | null {
   if (realSlice && realSlice.route === route && realSlice.node === node && realSlice.next === next) return realSlice
   const first = Math.max(0, Math.min(next - 1, node))
-  const last = Math.min(route.nodes.length - 1, node + JUNCTION_SLICE_AFTER)
+  // Past the junction, far enough that the truck is still on the slice at `JUNCTION_PAST_M`: the nodes' own
+  // distances (a curve's road is longer, and the bound is only where the slice stops being needed).
+  let last = node
+  let run = 0
+  while (last < route.nodes.length - 1 && last - node < JUNCTION_SLICE_AFTER_NODES && run < JUNCTION_SLICE_AFTER_M) {
+    run += lengthOf(route.nodes[last].position, route.nodes[last + 1].position)
+    last++
+  }
   const nodes = route.nodes.slice(first, last + 1)
   if (nodes.length < 2) return null
   // The junction lanes and the across-shifts are keyed by the route's own nodes: their slice's own.
@@ -216,15 +226,16 @@ function realSliceFor(route: JunctionRoute, node: number, next: number): RealSli
 
 /**
  * How far the truck is from the next turn's junction along the road, in real metres — never the game's GPS
- * distances, which are about 19 to 1 between towns and 3 to 1 in them. `null` without a turn, off the route,
- * or already through the junction.
+ * distances, which are about 19 to 1 between towns and 3 to 1 in them. Positive before the junction, negative
+ * once it's behind the truck (so the view can stay through the turn: `junctionAhead`), `null` when nothing can
+ * be measured (no turn, off the route, no spans).
  *
- * The truck is placed on the route from its own node to `JUNCTION_SLICE_AFTER` past the junction (`progressOf`,
- * which knows the way the truck faces: a road with both directions on it), and measured to the junction's own
- * node. `next` is the node ahead of the truck (live's `routeNext`) the slice and `progressOf` start from. A
- * truck whose straight line to the junction is already past `JUNCTION_MAX_M` can't be nearer by road (a road
- * is never shorter than the straight line), so no spans are built then and that lower bound is returned:
- * `junctionAhead` says no either way, and turns still kilometres off cost nothing.
+ * The truck is placed on the route from its own node to the way past the junction (`progressOf`, which knows
+ * the way the truck faces: a road with both directions on it), and measured to the junction's own node. `next`
+ * is the node ahead of the truck (live's `routeNext`) the slice and `progressOf` start from. A truck whose
+ * straight line to the junction is already past `JUNCTION_MAX_M` can't be nearer by road (a road is never
+ * shorter than the straight line), so no spans are built then and that lower bound is returned: `junctionAhead`
+ * says no either way, and turns still kilometres off cost nothing.
  */
 export function junctionRealDistance(
   route: JunctionRoute,
@@ -246,9 +257,63 @@ export function junctionRealDistance(
   if (!progress) return null
   const at = Math.min(slice.spanStart[progress.span] + progress.index, slice.line.length - 1)
   const travelled = slice.lengths[at] + lengthOf(slice.line[at], progress.at)
-  const distance = slice.centreLength - travelled
-  // Through the junction (its point behind the truck): the view has nothing left to show.
-  return distance < 0 ? null : distance
+  // Signed: past the junction, its arc length is behind the truck's.
+  return slice.centreLength - travelled
+}
+
+/** The turn the junction view should show, and the signed real road distance to it (metres). */
+export interface JunctionPick {
+  maneuver: Maneuver
+  /** Signed: negative once the junction is behind the truck (`junctionAhead` bounds both ways). */
+  distance: number
+  /** Whether it's the GPS's next step (`false`: the GPS has moved on, and the truck is still coming out of the
+   * junction). */
+  following: boolean
+}
+
+/**
+ * Which turn the panel shows: the GPS's next one while its junction is in reach (`junctionAhead`), else the
+ * last one behind the truck while the truck is still coming out of it (the GPS moves on to the next step a
+ * node or two past the junction, before the turn is driven out). `null`: nothing.
+ */
+export function junctionPickOf(
+  route: JunctionRoute,
+  maneuvers: readonly Maneuver[],
+  next: number,
+  truck: [number, number],
+  facing?: [number, number],
+  guidance?: Guidance | null,
+): JunctionPick | null {
+  if (guidance?.step.kind === 'turn') {
+    const distance = junctionRealDistance(route, guidance, truck, facing, next)
+    if (distance !== null && junctionAhead(distance)) {
+      return { maneuver: guidance.step.maneuver, distance, following: true }
+    }
+  }
+  const passed = lastPassed(maneuvers, next)
+  if (passed) {
+    const distance = junctionRealDistance(route, asTurn(passed), truck, facing, next)
+    if (distance !== null && distance <= 0 && junctionAhead(distance)) {
+      return { maneuver: passed, distance, following: false }
+    }
+  }
+  return null
+}
+
+/** A turn's guidance for the geometry alone (`junctionRealDistance` reads its step, not the GPS's distance). */
+function asTurn(maneuver: Maneuver): Guidance {
+  return { step: { kind: 'turn', maneuver }, distance: 0, then: null }
+}
+
+/**
+ * The last turn the GPS has moved past (`node <= next - 2`: `guidanceOf` keeps one while
+ * `node >= next - 1`), or `null`. Maneuvers come in route order.
+ */
+function lastPassed(maneuvers: readonly Maneuver[], next: number): Maneuver | null {
+  for (let at = maneuvers.length - 1; at >= 0; at--) {
+    if (maneuvers[at].node <= next - 2) return maneuvers[at]
+  }
+  return null
 }
 
 /** The route through the junction `node`: a slice of the spans, and where the junction is in that slice. */
@@ -381,9 +446,11 @@ let observer: ResizeObserver | null = null
 
 /**
  * Makes the junction view's map in `element` (lazily: the first call), and shows `options.view` in it.
- * Nothing is created before this; the map is the page's to keep until `detachJunctionMap`.
+ * Nothing is created before this. Returns the function that takes it down (its WebGL context and tiles with
+ * it); a map a newer `attachJunctionMap` has since taken (two screens' panels for a moment, a screen changing)
+ * is left to that newer one.
  */
-export function attachJunctionMap(element: HTMLElement, options: JunctionMapOptions): void {
+export function attachJunctionMap(element: HTMLElement, options: JunctionMapOptions): () => void {
   const mine = ++generation
   wanted = options.view ?? wanted
   ready = false
@@ -396,6 +463,9 @@ export function attachJunctionMap(element: HTMLElement, options: JunctionMapOpti
   resizing = null
   if (previous) previous.remove()
   void create(mine, element, options)
+  return () => {
+    if (mine === generation) detachJunctionMap({ remove: true })
+  }
 }
 
 /**
@@ -503,7 +573,8 @@ function addLayers(instance: MapInstance): void {
       'icon-allow-overlap': true,
       'icon-ignore-placement': true,
       'symbol-avoid-edges': false,
-      'icon-size': 0.9,
+      // The panel is half the map's height: the arrow a little larger than it was in a widget.
+      'icon-size': 1.1,
     },
   })
 }

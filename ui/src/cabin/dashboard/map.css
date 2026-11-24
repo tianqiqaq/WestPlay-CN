@@ -9,6 +9,48 @@
   border-radius: var(--panel-radius);
 }
 
+/* The map, split (MapSplit.tsx): the junction view above while a turn is near, the map below, squeezed to the
+   lower half in one motion. Closed, the panel is no height at all and the map stands exactly where it did. */
+.map-split {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* The tile takes what the panel leaves (all of it while the panel is closed). */
+.map-split > .map-tile {
+  flex: 1;
+  min-height: 0;
+}
+
+/* The junction's half: from nothing to half the split, the gap between the two panels taken out of both. */
+.junction-slot {
+  flex: 0 0 0;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+  border-radius: var(--panel-radius);
+  transition:
+    flex-basis var(--motion-spring-duration) var(--motion-ease),
+    margin-bottom var(--motion-spring-duration) var(--motion-ease),
+    margin-right var(--motion-duration) var(--motion-ease);
+}
+
+.map-split[data-junction] > .junction-slot {
+  flex-basis: calc(50% - var(--tile-gap, 16px) / 2);
+  margin-bottom: var(--tile-gap, 16px);
+  box-shadow: var(--shadow-raised-large);
+}
+
+/* Beside the Dashboard's widgets, the panel keeps to the map's own visible width (the widgets stand over the
+   tile's right: dashboard.css): square over the map it presses down on, not under the widgets. Once they're
+   away (map-grown), it takes the whole width, as the map does. */
+.screen.dashboard.has-widgets:not(.map-grown) .map-split[data-junction] > .junction-slot {
+  margin-right: calc(34.5% + var(--tile-gap, 16px));
+}
+
 /* Its layers (MapView.tsx), each the tile's size; on the Dashboard the window, the content and the still layer
    slide by transforms as the map grows and shrinks (dashboard.css). */
 .map-clip,
