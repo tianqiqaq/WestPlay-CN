@@ -55,7 +55,7 @@ export const JUNCTION_PAST_M = 80
 /** How far back from the junction the camera's bearing is taken, metres. */
 export const JUNCTION_APPROACH_M = 20
 /** The mini map's camera: above and behind the junction, looking down the way in. */
-export const JUNCTION_ZOOM = 16.8
+export const JUNCTION_ZOOM = 17.8
 export const JUNCTION_PITCH = 55
 /** The dimming above the map's ground, and the route's colours over it. */
 export const JUNCTION_DIM_OPACITY = 0.35
@@ -573,8 +573,10 @@ function addLayers(instance: MapInstance): void {
       'icon-allow-overlap': true,
       'icon-ignore-placement': true,
       'symbol-avoid-edges': false,
+      // The image's arrow points up; the route's line turns it, and this turns the tip the rest of the way round.
+      'icon-rotate': 90,
       // The panel is half the map's height: the arrow a little larger than it was in a widget.
-      'icon-size': 1.1,
+      'icon-size': 1.2,
     },
   })
 }
@@ -586,14 +588,18 @@ function chevronImage(): ImageData {
   canvas.height = CHEVRON_PIXELS
   const context = canvas.getContext('2d')
   if (!context) throw new Error('junction view: no 2d context for the arrow')
-  context.strokeStyle = '#ffffff'
-  context.lineWidth = 10
   context.lineCap = 'round'
   context.lineJoin = 'round'
   context.beginPath()
   context.moveTo(CHEVRON_PIXELS * 0.24, CHEVRON_PIXELS * 0.64)
   context.lineTo(CHEVRON_PIXELS * 0.5, CHEVRON_PIXELS * 0.28)
   context.lineTo(CHEVRON_PIXELS * 0.76, CHEVRON_PIXELS * 0.64)
+  // A dark casing first, the yellow arrow over it: thick, and clear on the bright route line.
+  context.strokeStyle = '#06232b'
+  context.lineWidth = 18
+  context.stroke()
+  context.strokeStyle = '#ffcc00'
+  context.lineWidth = 12
   context.stroke()
   return context.getImageData(0, 0, CHEVRON_PIXELS, CHEVRON_PIXELS)
 }
