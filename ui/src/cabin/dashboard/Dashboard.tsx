@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { GuidanceCard } from '../maps/GuidanceCard'
 import { useCabin } from '../state/store'
 import { useMapGrown } from './idle'
+import { JunctionView } from './JunctionView'
 import { MapView } from './MapView'
 import { useAnyWidget } from './widgetState'
 import { DestinationWidget, NowPlayingWidget, WeatherWidget } from './widgets'
@@ -38,6 +39,7 @@ export function Dashboard() {
     <section className={classes.join(' ')} aria-label="Dashboard">
       <MapView />
       <div className="widgets" hidden={!anyWidget}>
+        <JunctionView />
         <GuidanceCard variant="widget" />
         <NowPlayingWidget />
         <DestinationWidget />
