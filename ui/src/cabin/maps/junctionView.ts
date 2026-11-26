@@ -1,6 +1,7 @@
 import type { Appearance } from '../state/appearance'
 import type { Guidance, Maneuver } from './guidance'
 import type { MapData } from './mapData'
+import { bearingOf as bearingOfHeading } from './camera'
 import { toLngLat } from './projection'
 import { type Point, progressOf, type RouteNode, routeSpans, type Spans } from './route'
 import { mapStyle } from './style'
@@ -443,6 +444,11 @@ let wanted: JunctionView | null = null
 let generation = 0
 let resizing: number | null = null
 let observer: ResizeObserver | null = null
+/** The truck's position as the panel has it (the live map's puck, showTruck): 
+ull while it's not known. */
+let wantedTruck: { x: number; z: number; heading: number } | null = null
+/** The live map's truck marker (map-puck), over this map's canvas. */
+let puck: import('maplibre-gl').Marker | null = null
 
 /**
  * Makes the junction view's map in `element` (lazily: the first call), and shows `options.view` in it.
@@ -482,6 +488,9 @@ export function detachJunctionMap({ remove = true }: { remove?: boolean } = {}):
   observer = null
   const instance = map
   map = null
+  if (puck) puck.getElement().style.visibility = 'hidden'
+  puck = null
+  wantedTruck = null
   if (!instance) return
   if (remove) instance.remove()
   else instance.getCanvas().style.visibility = 'hidden'
@@ -497,8 +506,26 @@ export function showJunction(view: JunctionView | null): void {
     return
   }
   applyWanted(instance)
+  applyTruck()
 }
 
+/** Where the truck is, for the panel's own marker (`null`: not known, and none shows). */
+export function showTruck(truck: { x: number; z: number; heading: number } | null): void {
+  wantedTruck = truck
+  applyTruck()
+}
+
+/** Puts the truck's marker where it is, turned the way it faces (the live map's `bearingOf`), when the panel shows. */
+function applyTruck(): void {
+  if (!puck) return
+  const element = puck.getElement()
+  if (!wanted || !wantedTruck) {
+    element.style.visibility = 'hidden'
+    return
+  }
+  element.style.visibility = 'visible'
+  puck.setLngLat(toLngLat(wantedTruck.x, wantedTruck.z)).setRotation(bearingOfHeading(wantedTruck.heading))
+}
 async function create(mine: number, element: HTMLElement, options: JunctionMapOptions) {
   // MapLibre is loaded here, never at the module's top: the tests (and the pages that never show a junction)
   // have no DOM. Its worker URL is the live map's (liveMap.ts): one page, one worker file.
@@ -521,6 +548,14 @@ async function create(mine: number, element: HTMLElement, options: JunctionMapOp
   map = instance
   ready = false
   instance.getCanvas().style.visibility = 'hidden'
+  // The truck's own marker, the live map's (map-puck): a marker over the canvas, so it needs no style.
+  const puckElement = document.createElement('div')
+  puckElement.className = 'map-puck map-puck-junction'
+  puckElement.innerHTML =
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4.5 18 19l-6-3.2L6 19Z" fill="currentColor"/></svg>'
+  puckElement.style.visibility = 'hidden'
+  puck = new maplibregl.Marker({ element: puckElement, pitchAlignment: 'viewport', rotationAlignment: 'map' })
+  puck.setLngLat(toLngLat(wantedTruck?.x ?? 0, wantedTruck?.z ?? 0)).addTo(instance)
   // `style.load`, not `load`: the layers can be added as soon as the style is parsed, without waiting for the
   // first tiles.
   instance.on('style.load', () => {
@@ -529,6 +564,7 @@ async function create(mine: number, element: HTMLElement, options: JunctionMapOp
     addLayers(instance)
     ready = true
     applyWanted(instance)
+    applyTruck()
   })
   observer = new ResizeObserver(() => scheduleResize(instance))
   observer.observe(element)
@@ -588,12 +624,13 @@ function chevronImage(): ImageData {
   canvas.height = CHEVRON_PIXELS
   const context = canvas.getContext('2d')
   if (!context) throw new Error('junction view: no 2d context for the arrow')
-  context.lineCap = 'round'
-  context.lineJoin = 'round'
+  context.lineCap = 'butt'
+  context.lineJoin = 'miter'
+  context.miterLimit = 10
   context.beginPath()
-  context.moveTo(CHEVRON_PIXELS * 0.24, CHEVRON_PIXELS * 0.64)
-  context.lineTo(CHEVRON_PIXELS * 0.5, CHEVRON_PIXELS * 0.28)
-  context.lineTo(CHEVRON_PIXELS * 0.76, CHEVRON_PIXELS * 0.64)
+  context.moveTo(CHEVRON_PIXELS * 0.22, CHEVRON_PIXELS * 0.78)
+  context.lineTo(CHEVRON_PIXELS * 0.5, CHEVRON_PIXELS * 0.2)
+  context.lineTo(CHEVRON_PIXELS * 0.78, CHEVRON_PIXELS * 0.78)
   // A dark casing first, the yellow arrow over it: thick, and clear on the bright route line.
   context.strokeStyle = '#06232b'
   context.lineWidth = 26
@@ -610,6 +647,7 @@ function applyWanted(instance: MapInstance): void {
   const canvas = instance.getCanvas()
   if (!view) {
     canvas.style.visibility = 'hidden'
+    if (puck) puck.getElement().style.visibility = 'hidden'
     return
   }
   if (instance.getContainer().clientWidth > 0 && instance.getContainer().clientHeight > 0) instance.resize()

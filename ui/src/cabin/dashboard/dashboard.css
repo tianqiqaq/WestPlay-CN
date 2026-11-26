@@ -110,6 +110,18 @@
    the turn is in the corner. In the map's own split (map.css): half the map's height while there's a turn close
    ahead (`JUNCTION_MAX_M`) to `JUNCTION_PAST_M` past it. No glass under it: the map is the whole panel, dark
    until its tiles come. */
+/* The panel's truck: the live map's puck, a size down for the half-height map. */
+.junction .map-puck {
+  width: 34px;
+  height: 34px;
+  border-width: 3px;
+}
+
+.junction .map-puck svg {
+  width: 18px;
+  height: 18px;
+}
+
 .junction {
   position: relative;
   flex: 1;

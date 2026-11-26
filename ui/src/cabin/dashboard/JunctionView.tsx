@@ -6,7 +6,7 @@ import { useLook } from '../state/hooks'
 import { useLive } from '../state/store'
 import { useText } from '../state/text'
 import { guidanceOf } from '../maps/guidance'
-import { attachJunctionMap, junctionViewOf, showJunction } from '../maps/junctionView'
+import { attachJunctionMap, junctionViewOf, showJunction, showTruck } from '../maps/junctionView'
 import { useMapData } from '../maps/mapData'
 import { junctionCardOf } from './junctionCard'
 
@@ -68,6 +68,16 @@ export function JunctionView() {
     }
     showJunction(junctionViewOf(route, { step: { kind: 'turn', maneuver }, distance: 0, then: null }))
   }, [show, maneuver, route, step, appearance, data])
+
+  // The truck's own marker on the panel: the live map's puck, moved as the telemetry comes (no re-render).
+  useEffect(() => {
+    const update = () => {
+      const telemetry = useLive.getState().telemetry
+      showTruck(telemetry ? { x: telemetry.x, z: telemetry.z, heading: telemetry.heading } : null)
+    }
+    update()
+    return useLive.subscribe(update)
+  }, [])
 
   // The last card closed: nothing of the junction is wanted any more.
   useEffect(() => () => showJunction(null), [])
