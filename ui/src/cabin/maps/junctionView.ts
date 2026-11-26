@@ -39,8 +39,8 @@ export interface JunctionView {
 }
 
 /** How far along the route the view starts before the junction, and ends after it, metres. */
-export const JUNCTION_BEFORE_M = 80
-export const JUNCTION_AFTER_M = 40
+export const JUNCTION_BEFORE_M = 400
+export const JUNCTION_AFTER_M = 200
 /**
  * How far before the junction the view shows, in real road metres — not the game's GPS distances (about 19 to
  * 1 out of town, 3 to 1 in it: 350 of its metres are about 18 real ones, and the turn was past before the card
@@ -59,10 +59,10 @@ export const JUNCTION_ZOOM = 17.8
 export const JUNCTION_PITCH = 55
 /** The dimming above the map's ground, and the route's colours over it. */
 export const JUNCTION_DIM_OPACITY = 0.35
-export const JUNCTION_ROUTE_COLOUR = '#38e1ff'
+export const JUNCTION_ROUTE_COLOUR = '#ffcc00'
 export const JUNCTION_CASING_COLOUR = '#06232b'
 /** Between two arrows along the route, pixels. */
-export const JUNCTION_CHEVRON_SPACING = 56
+export const JUNCTION_CHEVRON_SPACING = 76
 
 /**
  * Whether the junction view shows, from the turn's real road distance (`junctionRealDistance`, signed: positive
@@ -126,10 +126,10 @@ export function facingOfHeading(heading: number): Point {
   return [-Math.sin(radians), -Math.cos(radians)]
 }
 
-/** How many nodes either side of the junction the spans are made from: more than the route's 80 m before and
- * 40 m after cover in any town, and far fewer than a route across the map has (tens of thousands of nodes:
+/** How many nodes either side of the junction the spans are made from: more than the route's 400 m before and
+ * 200 m after cover in any town, and far fewer than a route across the map has (tens of thousands of nodes:
  * the view mustn't build the whole route's spans for one turn). */
-const JUNCTION_WINDOW = 12
+const JUNCTION_WINDOW = 80
 
 /** The route's spans around the junction `node`, and where the junction is among them (its slice's node). */
 function junctionSpans(route: JunctionRoute, node: number): { spans: Spans; at: number } {
@@ -551,14 +551,14 @@ function addLayers(instance: MapInstance): void {
     type: 'line',
     source: ROUTE_SOURCE,
     layout: { 'line-join': 'round', 'line-cap': 'round' },
-    paint: { 'line-color': JUNCTION_CASING_COLOUR, 'line-width': 13, 'line-opacity': 0.9 },
+    paint: { 'line-color': JUNCTION_CASING_COLOUR, 'line-width': 22, 'line-opacity': 0.95 },
   })
   instance.addLayer({
     id: ROUTE_LAYER,
     type: 'line',
     source: ROUTE_SOURCE,
     layout: { 'line-join': 'round', 'line-cap': 'round' },
-    paint: { 'line-color': JUNCTION_ROUTE_COLOUR, 'line-width': 8 },
+    paint: { 'line-color': JUNCTION_ROUTE_COLOUR, 'line-width': 15 },
   })
   instance.addLayer({
     id: CHEVRON_LAYER,
@@ -576,7 +576,7 @@ function addLayers(instance: MapInstance): void {
       // The image's arrow points up; the route's line turns it, and this turns the tip the rest of the way round.
       'icon-rotate': 90,
       // The panel is half the map's height: the arrow a little larger than it was in a widget.
-      'icon-size': 1.2,
+      'icon-size': 1.35,
     },
   })
 }
@@ -596,10 +596,10 @@ function chevronImage(): ImageData {
   context.lineTo(CHEVRON_PIXELS * 0.76, CHEVRON_PIXELS * 0.64)
   // A dark casing first, the yellow arrow over it: thick, and clear on the bright route line.
   context.strokeStyle = '#06232b'
-  context.lineWidth = 18
+  context.lineWidth = 26
   context.stroke()
   context.strokeStyle = '#ffcc00'
-  context.lineWidth = 12
+  context.lineWidth = 18
   context.stroke()
   return context.getImageData(0, 0, CHEVRON_PIXELS, CHEVRON_PIXELS)
 }
