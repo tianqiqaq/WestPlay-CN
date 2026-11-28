@@ -140,9 +140,39 @@ pub fn set_page(width: u32, height: u32, rows: u32) {
     *page().lock().unwrap_or_else(|e| e.into_inner()) = (width.max(1), height.max(1), rows.max(1));
 }
 
+/// The page as the viewer should have it: the game's strips cut off (`crop`), so what it shows is the page's own
+/// area, its whole.
 fn page_shape() -> (u32, u32, u32) {
-    *page().lock().unwrap_or_else(|e| e.into_inner())
+    let (width, height, rows) = *page().lock().unwrap_or_else(|e| e.into_inner());
+    let (left, bottom) = *crop().lock().unwrap_or_else(|e| e.into_inner());
+    let left = left.min(width.saturating_sub(1));
+    let bottom = bottom.min(height.saturating_sub(1));
+    let bottom_rows = ((u64::from(bottom) * u64::from(rows)) / u64::from(height.max(1))) as u32;
+    (width - left, height - bottom, rows.saturating_sub(bottom_rows).max(1))
 }
+
+/// The game's strips in the frame's pixels: the left across, the bottom down (0, 0 for none): what the mirror
+/// reads back, the rest of the frame cut off.
+pub fn crop_frame() -> (u32, u32) {
+    let (width, height, rows) = *page().lock().unwrap_or_else(|e| e.into_inner());
+    let (left, bottom) = *crop().lock().unwrap_or_else(|e| e.into_inner());
+    let left = left.min(width.saturating_sub(1));
+    let bottom_rows = ((u64::from(bottom) * u64::from(rows)) / u64::from(height.max(1))) as u32;
+    (left, bottom_rows.min(rows.saturating_sub(1)))
+}
+
+/// How much of the page the game's own strips take (0, 0 when there are none): `left` in the page's pixels,
+/// `bottom` in the page's rows (as the game lays it out: `set_page`).
+pub fn set_crop(left: u32, bottom: u32) {
+    *crop().lock().unwrap_or_else(|e| e.into_inner()) = (left, bottom);
+}
+
+fn crop() -> &'static Mutex<(u32, u32)> {
+    CROP.get_or_init(|| Mutex::new((0, 0)))
+}
+
+/// The mirror's own crop of the page's strips: `left` across, `bottom` down, both in the page's own pixels/rows.
+static CROP: OnceLock<Mutex<(u32, u32)>> = OnceLock::new();
 
 fn raw() -> &'static Inbox<Raw> {
     RAW.get_or_init(Inbox::new)

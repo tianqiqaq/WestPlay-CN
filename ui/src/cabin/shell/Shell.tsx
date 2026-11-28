@@ -61,6 +61,11 @@ export function Shell({ children, overlay, entering = false }: ShellProps) {
     root.setProperty('--oem-left', `${insets.left}px`)
     root.setProperty('--oem-bottom', `${insets.bottom}px`)
   }, [insets.left, insets.bottom])
+  // The game's own strips around the page: the mirror cuts them off, so the browser shows the page itself, its
+  // whole area, and not the black edges the game's sidebar and bar leave in the frame.
+  useEffect(() => {
+    postToHost({ type: 'mirrorCrop', left: insets.left, bottom: insets.bottom })
+  }, [insets.left, insets.bottom])
   // The profile's margin round CarPlay, on <html> too: where the screens start (`--content-left`) is worked out
   // there from it. None: the stylesheet's own.
   useLayoutEffect(() => {

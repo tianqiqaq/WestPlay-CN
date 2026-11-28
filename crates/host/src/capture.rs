@@ -308,19 +308,25 @@ impl Capture {
         }
         // The frame as the game gets it, for the player's phone or tablet too (mirror.rs), read in this same locked
         // turn: only while a viewer watches, and no more often than the settings' frames a second.
-        let read = crate::mirror::watching() && crate::mirror::wants_frame() && self.read_back();
+        let read = if crate::mirror::watching() && crate::mirror::wants_frame() { self.read_back() } else { None };
         self.shared.unlock();
-        if read {
+        if let Some((width, rows)) = read {
             let bgra = self.bgra.borrow();
-            crate::mirror::publish_frame(self.shared.width, self.shared.height, &bgra);
+            crate::mirror::publish_frame(width, rows, &bgra);
         }
         Lock::Held
     }
 
     /// Copies the shared frame (the lock held) into the readable texture and out as BGRA rows (`false`: this turn's
     /// frame couldn't be read, and the next is waited for).
-    fn read_back(&self) -> bool {
+    fn read_back(&self) -> Option<(u32, u32)> {
         let (width, height) = (self.shared.width as usize, self.shared.height as usize);
+        // The truck's own strips (Scania's sidebar and bar) are the page's edges: out of the mirror, which shows the
+        // page's own area whole.
+        let (left, bottom) = crate::mirror::crop_frame();
+        let left = (left as usize).min(width.saturating_sub(1));
+        let bottom = (bottom as usize).min(height.saturating_sub(1));
+        let (shown, rows) = (width - left, height - bottom);
         // SAFETY: both textures are alive and the same size and format, the shared one locked (compose's caller), and
         // the readable one is only ours; its rows are read within the pitch the GPU mapped.
         unsafe {
@@ -330,21 +336,21 @@ impl Capture {
                 if !self.readback_failed.replace(true) {
                     crate::log!("mirror: a frame couldn't be read back: {e}");
                 }
-                return false;
+                return None;
             }
             let mut bgra = self.bgra.borrow_mut();
-            bgra.resize(width * height * 4, 0);
-            for row in 0..height {
+            bgra.resize(shown * rows * 4, 0);
+            for row in 0..rows {
                 let line = std::slice::from_raw_parts(
-                    (mapped.pData as *const u8).add(row * mapped.RowPitch as usize),
-                    width * 4,
+                    (mapped.pData as *const u8).add(row * mapped.RowPitch as usize + left * 4),
+                    shown * 4,
                 );
-                bgra[row * width * 4..(row + 1) * width * 4].copy_from_slice(line);
+                bgra[row * shown * 4..(row + 1) * shown * 4].copy_from_slice(line);
             }
             self.context.Unmap(&self.readback, 0);
         }
         self.readback_failed.set(false);
-        true
+        Some((shown as u32, rows as u32))
     }
 }
 

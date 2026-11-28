@@ -490,6 +490,9 @@ export type PageMessage =
   | { type: 'wallpaper'; id: string }
   /** The Vehicle Bar (the truck's strip) kept or not, chosen in Settings › Appearance, kept the same way. */
   | { type: 'truckStrip'; strip: 'auto' | 'off' }
+  /** The game's own strips around the page (the Scania Smart Dash's sidebar and bar), which the mirror cuts off:
+   * \left\ across the page, \ottom\ down it (in its rows, as the game lays it out). */
+  | { type: 'mirrorCrop'; left: number; bottom: number }
   /** The players' tone, set in Settings › Equalizer: the player's curve, and whether it plays (Custom) or the
    * speakers as tuned (Recommended); kept with WestPlay's settings and played by every player. */
   | ({ type: 'equalizer'; custom: boolean } & Equalizer)

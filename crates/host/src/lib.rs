@@ -1051,6 +1051,7 @@ pub fn run(mut config: Config, stop: Arc<AtomicBool>) -> Result<(), Error> {
                         (config.on_settings)(&settings);
                     }
                 }
+                Some(PageMessage::MirrorCrop { left, bottom }) => crate::mirror::set_crop(left, bottom),
                 Some(PageMessage::Spectrum { on }) => spectrum = on,
                 Some(PageMessage::Brightness { level }) => {
                     screen_light = brightness::light(level);
@@ -3050,6 +3051,9 @@ enum PageMessage {
     Wallpaper { id: String },
     /// The truck's information bar beside WestPlay, kept or not, chosen in the cab's Settings (Appearance).
     TruckStrip { strip: settings::TruckStrip },
+    /// The page's own strips the game draws around it (the Scania Smart Dash's sidebar and bar), which the mirror
+    /// cuts off: `left` across the page, `bottom` down it (in its rows, as the game lays it out).
+    MirrorCrop { left: u32, bottom: u32 },
     /// The players' tone, set in the cab's Settings (Equalizer): the player's curve (bass, mid and treble, dB
     /// each), and whether it plays (Custom) or the speakers as tuned (Recommended).
     Equalizer {
