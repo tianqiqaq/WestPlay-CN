@@ -461,7 +461,9 @@ canvas{position:fixed;cursor:none;pointer-events:auto;background:#000}
   const IN_FLIGHT = 2;
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   function layout() {
-    const scale = Math.min(window.innerWidth / shapeW, window.innerHeight / shapeH);
+    // Filled, not fitted: the picture covers the page, its edges cropped rather than left as black bands (the
+    // phone or tablet in landscape has another shape than the truck's screen, and this one's whole width shows).
+    const scale = Math.max(window.innerWidth / shapeW, window.innerHeight / shapeH);
     const w = Math.max(1, Math.round(shapeW * scale));
     const h = Math.max(1, Math.round(shapeH * scale));
     const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
